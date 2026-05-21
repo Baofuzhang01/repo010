@@ -89,12 +89,17 @@ jobs:
         if: ${{ always() }}
         env:
           DISPATCH_PAYLOAD: ${{ toJson(matrix.user) }}
-          RESERVE_RESULT_CENTER_URL: ${{ vars.RESERVE_RESULT_CENTER_URL || secrets.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_CENTER_URL_VAR: ${{ vars.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_CENTER_URL_SECRET: ${{ secrets.RESERVE_RESULT_CENTER_URL }}
           RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
         run: |
           export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
-          echo "result center configured: url=$([[ -n \"$RESERVE_RESULT_CENTER_URL\" ]] && echo yes || echo no), token=$([[ -n \"$RESERVE_RESULT_REPORT_TOKEN\" ]] && echo yes || echo no)"
-          python scripts/report_github_reserve_result.py --log reserve.log || true
+          center_url="${RESERVE_RESULT_CENTER_URL_VAR:-$RESERVE_RESULT_CENTER_URL_SECRET}"
+          echo "result center configured: url=$([[ -n "$center_url" ]] && echo yes || echo no), token=$([[ -n "$RESERVE_RESULT_REPORT_TOKEN" ]] && echo yes || echo no)"
+          python scripts/report_github_reserve_result.py \
+            --log reserve.log \
+            --center-url "$center_url" \
+            --token "$RESERVE_RESULT_REPORT_TOKEN" || true
 
       - name: Extract key logs
         if: ${{ always() }}
@@ -290,12 +295,17 @@ jobs:
       - name: Report reserve result to center (manual)
         if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
         env:
-          RESERVE_RESULT_CENTER_URL: ${{ vars.RESERVE_RESULT_CENTER_URL || secrets.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_CENTER_URL_VAR: ${{ vars.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_CENTER_URL_SECRET: ${{ secrets.RESERVE_RESULT_CENTER_URL }}
           RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
         run: |
           export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
-          echo "result center configured: url=$([[ -n \"$RESERVE_RESULT_CENTER_URL\" ]] && echo yes || echo no), token=$([[ -n \"$RESERVE_RESULT_REPORT_TOKEN\" ]] && echo yes || echo no)"
-          python scripts/report_github_reserve_result.py --log reserve.log || true
+          center_url="${RESERVE_RESULT_CENTER_URL_VAR:-$RESERVE_RESULT_CENTER_URL_SECRET}"
+          echo "result center configured: url=$([[ -n "$center_url" ]] && echo yes || echo no), token=$([[ -n "$RESERVE_RESULT_REPORT_TOKEN" ]] && echo yes || echo no)"
+          python scripts/report_github_reserve_result.py \
+            --log reserve.log \
+            --center-url "$center_url" \
+            --token "$RESERVE_RESULT_REPORT_TOKEN" || true
 
       - name: Extract key logs (manual)
         if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
