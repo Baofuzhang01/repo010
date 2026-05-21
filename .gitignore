@@ -151,6 +151,9 @@ switch_remote.py
 auto_commit.sh
 extract_room_ids.py
 sync_shared_files.py
+bootstrap_new_server.sh
+deploy_qianduan_server.sh
+deploy_server.sh
 .sync_shared_files_cache/
 
 # Cloudflare Workers 本地缓存

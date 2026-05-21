@@ -76,7 +76,21 @@ jobs:
           TULINGCLOUD_PASSWORD: ${{ secrets.TULINGCLOUD_PASSWORD }}
           TULINGCLOUD_MODEL_ID: ${{ secrets.TULINGCLOUD_MODEL_ID }}
         run: |
+          set +e
           python main.py --action --dispatch 2>&1 | tee reserve.log
+          code="${PIPESTATUS[0]}"
+          echo "RESERVE_ACTION_RETURN_CODE=${code}" >> "$GITHUB_ENV"
+          exit "$code"
+
+      - name: Report reserve result to center (dispatch)
+        if: ${{ always() }}
+        env:
+          DISPATCH_PAYLOAD: ${{ toJson(matrix.user) }}
+          RESERVE_RESULT_CENTER_URL: ${{ vars.RESERVE_RESULT_CENTER_URL || secrets.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
+        run: |
+          export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
+          python scripts/report_github_reserve_result.py --log reserve.log || true
 
       - name: Extract key logs
         if: ${{ always() }}
@@ -254,7 +268,20 @@ jobs:
           TULINGCLOUD_PASSWORD: ${{ secrets.TULINGCLOUD_PASSWORD }}
           TULINGCLOUD_MODEL_ID: ${{ secrets.TULINGCLOUD_MODEL_ID }}
         run: |
+          set +e
           python main.py --action 2>&1 | tee reserve.log
+          code="${PIPESTATUS[0]}"
+          echo "RESERVE_ACTION_RETURN_CODE=${code}" >> "$GITHUB_ENV"
+          exit "$code"
+
+      - name: Report reserve result to center (manual)
+        if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
+        env:
+          RESERVE_RESULT_CENTER_URL: ${{ vars.RESERVE_RESULT_CENTER_URL || secrets.RESERVE_RESULT_CENTER_URL }}
+          RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
+        run: |
+          export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
+          python scripts/report_github_reserve_result.py --log reserve.log || true
 
       - name: Extract key logs (manual)
         if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}

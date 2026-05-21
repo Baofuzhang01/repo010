@@ -780,6 +780,7 @@ def strategic_first_attempt(
             )
         captcha1 = captcha2 = captcha3 = ""
         live_captcha_results = None
+        textclick_preheat_thread = None
 
         def _resolve_textclick_with_retries(
             captcha_session,
@@ -1034,15 +1035,15 @@ def strategic_first_attempt(
                         "[strategic] Preheat textclick captcha1 until it has validate "
                         "or reaches the pre-warm hard deadline"
                     )
-                    t = threading.Thread(
+                    textclick_preheat_thread = threading.Thread(
                         target=_worker,
                         name="textclick-captcha-1",
                         daemon=True,
                     )
-                    t.start()
+                    textclick_preheat_thread.start()
                     timeout_left = deadline_mono - time.monotonic()
                     if timeout_left > 0:
-                        t.join(timeout=timeout_left)
+                        textclick_preheat_thread.join(timeout=timeout_left)
 
                 captcha1 = captcha_results[1]
                 captcha2 = ""
@@ -1256,6 +1257,24 @@ def strategic_first_attempt(
                     "[strategic] Textclick captcha1 empty before token stage; "
                     f"continue resolving until {hard_deadline} before fetching token"
                 )
+
+                if (
+                    textclick_preheat_thread is not None
+                    and textclick_preheat_thread.is_alive()
+                ):
+                    wait_s = max(0.0, (hard_deadline - _beijing_now()).total_seconds())
+                    logging.info(
+                        "[strategic] Textclick preheat thread is still running; "
+                        "wait for existing captcha request before starting another"
+                    )
+                    textclick_preheat_thread.join(timeout=wait_s)
+                    _refresh_submit_captchas_from_live_results()
+                    if captchas_for_submit[0]:
+                        logging.info(
+                            "[strategic] Textclick captcha1 received from existing "
+                            "preheat thread before strategic token fetch"
+                        )
+                        return True
 
                 def _remaining_first_captcha_seconds() -> float:
                     return (hard_deadline - _beijing_now()).total_seconds()
@@ -1481,16 +1500,43 @@ def strategic_first_attempt(
                     milliseconds=WARM_CONNECTION_LEAD_MS
                 )
                 _wait_until(warm_dt)
-                first_token_start_dt = _get_first_token_start_dt(target_dt)
-                warm_budget_s = (first_token_start_dt - _beijing_now()).total_seconds()
-                warm_timeout_s = min(5.0, max(0.001, warm_budget_s))
-                logging.info(
-                    "[warm] Dispatch connection pre-warm before first probe/token window: "
-                    f"budget {warm_budget_s * 1000:.0f}ms; background timeout "
-                    f"{warm_timeout_s * 1000:.0f}ms"
-                )
-                _fire_and_forget_warm_connection(s, _warm_url, timeout_s=warm_timeout_s)
-                warm_done = True
+                if ENABLE_TEXTCLICK:
+                    _refresh_submit_captchas_from_live_results()
+                    if (
+                        not captchas_for_submit[0]
+                        and textclick_preheat_thread is not None
+                        and textclick_preheat_thread.is_alive()
+                    ):
+                        logging.info(
+                            "[warm] Skip connection pre-warm because textclick captcha "
+                            "preheat is still waiting for validate"
+                        )
+                        warm_done = True
+                    elif not captchas_for_submit[0]:
+                        logging.info(
+                            "[warm] Skip connection pre-warm because textclick captcha "
+                            "is not ready yet"
+                        )
+                        warm_done = True
+                if warm_done:
+                    pass
+                else:
+                    first_token_start_dt = _get_first_token_start_dt(target_dt)
+                    warm_budget_s = (first_token_start_dt - _beijing_now()).total_seconds()
+                    if warm_budget_s <= 0:
+                        logging.info(
+                            "[warm] Skip connection pre-warm because token window is already due"
+                        )
+                        warm_done = True
+                    else:
+                        warm_timeout_s = min(5.0, max(0.001, warm_budget_s))
+                        logging.info(
+                            "[warm] Dispatch connection pre-warm before first probe/token window: "
+                            f"budget {warm_budget_s * 1000:.0f}ms; background timeout "
+                            f"{warm_timeout_s * 1000:.0f}ms"
+                        )
+                        _fire_and_forget_warm_connection(s, _warm_url, timeout_s=warm_timeout_s)
+                        warm_done = True
 
         if not _ensure_textclick_captcha1_before_strategic_token():
             continue
