@@ -2531,19 +2531,6 @@ class reserve:
                         time.sleep(self.sleep_time)
                         self.max_attempt -= 1
                         continue
-                # 页面隐藏值只能使用一次，且再次刷新页面会使旧值失效。
-                # 普通抢先准备验证码，再获取最新页面 token/value，之后只查座并立即提交。
-                token, value = self._get_page_token(
-                    page_url,
-                    require_value=True,
-                    method="GET",
-                )
-                logging.info(f"从 {page_url} 获取页面 token：{token}")
-                if not token:
-                    logging.warning(
-                        "未获取到 submit_enc token，结束当前提交循环并等待新 session 重试"
-                    )
-                    break
                 conflict = self.check_getusedtimes_conflict_sync(
                     normalized_times,
                     slot_roomid,
@@ -2553,8 +2540,8 @@ class reserve:
                 )
                 if conflict is True:
                     logging.info(
-                        "[提交] 拿到凭据后 getusedtimes 发现座位冲突，"
-                        "丢弃本次页面 token 并切换候选座位；验证码尚未提交，仍可复用："
+                        "[提交] 普通候补 getusedtimes 发现座位冲突，"
+                        "不获取页面 token、不提交；验证码尚未消费，继续保留复用："
                         "roomId=%s seatNum=%s day=%s",
                         slot_roomid,
                         seat,
@@ -2563,11 +2550,32 @@ class reserve:
                     break
                 if conflict is None:
                     logging.info(
-                        "[提交] 拿到凭据后 getusedtimes 状态未知，立即提交当前候选座位："
+                        "[提交] 普通候补 getusedtimes 状态未知，按严格顺序跳过当前候选座位；"
+                        "不获取页面 token、不提交，验证码尚未消费："
                         "roomId=%s seatNum=%s",
                         slot_roomid,
                         seat,
                     )
+                    break
+                logging.info(
+                    "[提交] 普通候补 getusedtimes 确认座位空闲，开始获取页面 token 并立即提交："
+                    "roomId=%s seatNum=%s",
+                    slot_roomid,
+                    seat,
+                )
+                # 页面隐藏值只能使用一次，且再次刷新页面会使旧值失效。
+                # 普通候补顺序：先有有效验证码，再查座确认空闲，最后获取最新页面 token/value 并立即提交。
+                token, value = self._get_page_token(
+                    page_url,
+                    require_value=True,
+                    method="GET",
+                )
+                logging.info(f"从 {page_url} 获取页面 token：{token}")
+                if not token:
+                    logging.warning(
+                        "未获取到 submit_enc token，结束当前提交循环；验证码尚未提交消费，保留给后续候补复用"
+                    )
+                    break
                 suc = self.get_submit(
                     self.submit_url,
                     times=normalized_times,

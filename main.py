@@ -1920,7 +1920,20 @@ def strategic_first_attempt(
 
             def _serial_get_submit(shot_idx: int, **kwargs):
                 serial_submitted_shots.add(shot_idx)
-                return s.get_submit(**kwargs)
+                submit_captcha = str(kwargs.get("captcha") or "")
+                try:
+                    return s.get_submit(**kwargs)
+                finally:
+                    if (
+                        ENABLE_ROTATE
+                        and submit_captcha
+                        and submit_captcha == getattr(s, "_rotate_normal_reusable_captcha", "")
+                    ):
+                        s._rotate_normal_reusable_captcha = ""
+                        logging.info(
+                            "[策略] 第 %d 枪已提交此前暂存的验证码，已从普通候补复用池移除",
+                            shot_idx,
+                        )
 
             def _remember_serial_target(submit_room, submit_seat, submit_page_id, submit_fid):
                 nonlocal serial_target_room, serial_target_seat
@@ -1936,6 +1949,49 @@ def strategic_first_attempt(
                     submit_fid,
                     submit_seat,
                 )
+
+            def _serial_followup_seat_is_free(shot_idx: int) -> bool:
+                conflict = s.check_getusedtimes_conflict_sync(
+                    times,
+                    serial_target_room,
+                    serial_target_seat,
+                    submit_day,
+                    fid_enc=serial_target_fid,
+                )
+                if conflict is False:
+                    logging.info(
+                        "[策略] 第 %d 枪提交前查座：当前目标座位 %s/%s 空闲，允许提交",
+                        shot_idx,
+                        serial_target_room,
+                        serial_target_seat,
+                    )
+                    return True
+                if conflict is True:
+                    logging.info(
+                        "[策略] 第 %d 枪提交前查座：当前目标座位 %s/%s 已冲突，跳过本枪提交，验证码不消费",
+                        shot_idx,
+                        serial_target_room,
+                        serial_target_seat,
+                    )
+                    return False
+                logging.info(
+                    "[策略] 第 %d 枪提交前查座：当前目标座位 %s/%s 状态未知，按严格顺序跳过本枪提交，验证码不消费",
+                    shot_idx,
+                    serial_target_room,
+                    serial_target_seat,
+                )
+                return False
+
+            def _stash_unconsumed_followup_captcha(shot_idx: int, captcha: str, reason: str):
+                if not captcha:
+                    return
+                if ENABLE_ROTATE:
+                    s._rotate_normal_reusable_captcha = captcha
+                    logging.info(
+                        "[策略] 第 %d 枪验证码未提交消费（%s），已放入普通候补复用池",
+                        shot_idx,
+                        reason,
+                    )
 
             if skip_first_strategic_submit:
                 logging.warning(
@@ -2146,7 +2202,7 @@ def strategic_first_attempt(
                     )
                     success_list[index] = suc
                     continue
-                logging.info("[策略] 第一枪未成功，准备使用新的页面 token 进行第二枪提交")
+                logging.info("[策略] 第一枪未成功，准备第二枪：先准备验证码，再查座，空闲后取新页面 token 提交")
                 first_failure_msg = _last_submit_failure_msg()
                 first_submit_sent = 1 in serial_submitted_shots
                 logging.info(
@@ -2169,28 +2225,33 @@ def strategic_first_attempt(
                         max_retries=3 if skip_first_strategic_submit else None,
                     )
 
-                if STRATEGIC_MODE == "A":
-                    token2, value2 = _get_page_token_until_success(
-                        s,
-                        serial_target_token_url,
-                        require_value=True,
-                        retry_until=target_dt + datetime.timedelta(seconds=40),
-                        retry_interval=0.005,
-                        label="[A] Second token",
-                    )
-                else:
-                    token2, value2 = s._get_page_token(
-                        serial_target_token_url,
-                        require_value=True,
-                    )
-                if not token2:
-                    logging.error("[策略] 第二枪获取页面 token 失败，跳到第三枪/普通流程")
+                submit_captcha2 = _get_submit_captcha(2)
+                if submit_captcha2 is None:
+                    suc = False
+                elif not _serial_followup_seat_is_free(2):
+                    _stash_unconsumed_followup_captcha(2, submit_captcha2, "查座未确认空闲")
+                    suc = False
                 else:
                     logging.info(
-                        "[策略] 第二枪跳过查座，立即使用新的验证码 + 页面 token 提交"
+                        "[策略] 第二枪查座确认空闲，开始获取新的页面 token 并立即提交"
                     )
-                    submit_captcha2 = _get_submit_captcha(2)
-                    if submit_captcha2 is None:
+                    if STRATEGIC_MODE == "A":
+                        token2, value2 = _get_page_token_until_success(
+                            s,
+                            serial_target_token_url,
+                            require_value=True,
+                            retry_until=target_dt + datetime.timedelta(seconds=40),
+                            retry_interval=0.005,
+                            label="[A] Second token",
+                        )
+                    else:
+                        token2, value2 = s._get_page_token(
+                            serial_target_token_url,
+                            require_value=True,
+                        )
+                    if not token2:
+                        logging.error("[策略] 第二枪获取页面 token 失败，验证码未消费，跳到第三枪/普通流程")
+                        _stash_unconsumed_followup_captcha(2, submit_captcha2, "获取页面 token 失败")
                         suc = False
                     else:
                         suc = _serial_get_submit(
@@ -2215,7 +2276,7 @@ def strategic_first_attempt(
                     )
                     success_list[index] = suc
                     continue
-                logging.info("[策略] 第二枪未成功，准备使用新的页面 token 进行第三枪提交")
+                logging.info("[策略] 第二枪未成功，准备第三枪：先准备验证码，再查座，空闲后取新页面 token 提交")
                 second_failure_msg = _last_submit_failure_msg()
                 second_submit_sent = 2 in serial_submitted_shots
                 logging.info(
@@ -2235,18 +2296,23 @@ def strategic_first_attempt(
                         "[策略] 第二枪没有发送预约 POST；第三枪复用第二枪未消费的新验证码"
                     )
 
-                token3, value3 = s._get_page_token(
-                    serial_target_token_url,
-                    require_value=True,
-                )
-                if not token3:
-                    logging.error("[策略] 第三枪获取页面 token 失败，放弃当前配置的策略提交")
+                submit_captcha3 = _get_submit_captcha(3)
+                if submit_captcha3 is None:
+                    suc = False
+                elif not _serial_followup_seat_is_free(3):
+                    _stash_unconsumed_followup_captcha(3, submit_captcha3, "查座未确认空闲")
+                    suc = False
                 else:
                     logging.info(
-                        "[策略] 第三枪跳过查座，立即使用新的验证码 + 页面 token 提交"
+                        "[策略] 第三枪查座确认空闲，开始获取新的页面 token 并立即提交"
                     )
-                    submit_captcha3 = _get_submit_captcha(3)
-                    if submit_captcha3 is None:
+                    token3, value3 = s._get_page_token(
+                        serial_target_token_url,
+                        require_value=True,
+                    )
+                    if not token3:
+                        logging.error("[策略] 第三枪获取页面 token 失败，验证码未消费，放入普通候补复用池")
+                        _stash_unconsumed_followup_captcha(3, submit_captcha3, "获取页面 token 失败")
                         suc = False
                     else:
                         suc = _serial_get_submit(
