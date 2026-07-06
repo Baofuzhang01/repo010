@@ -204,6 +204,7 @@ class OfficeTraceHTTPAdapter(HTTPAdapter):
 class reserve:
     textclick_normal_request_count = 0
     textclick_normal_request_limit = 4
+    rotate_normal_consumed_captcha_limit = 3
 
     def __init__(
         self,
@@ -2403,7 +2404,11 @@ class reserve:
             }
             for seat in seat_candidates
         ]
-        if (self.enable_textclick or self.enable_iconclick) and isinstance(backup_slots, list):
+        if (
+            self.enable_textclick
+            or self.enable_iconclick
+            or self.enable_rotate
+        ) and isinstance(backup_slots, list):
             for backup in backup_slots:
                 if not isinstance(backup, dict):
                     continue
@@ -2421,6 +2426,8 @@ class reserve:
                 )
 
         suc = False
+        rotate_reusable_captcha = ""
+        rotate_consumed_captcha_count = 0
         for slot in candidate_slots:
             slot_roomid = slot["roomid"]
             seat = slot["seatid"]
@@ -2436,7 +2443,7 @@ class reserve:
                     end_dt = _resolve_beijing_end_dt(endtime_hms, beijing_now)
                     if beijing_now >= end_dt:
                         logging.info(
-                            f"[submit] Current Beijing time {beijing_now.strftime('%Y-%m-%d %H:%M:%S')} >= end_dt {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (ENDTIME {endtime_hms}), stop submit loop"
+                            f"[提交] 当前北京时间 {beijing_now.strftime('%Y-%m-%d %H:%M:%S')} >= 结束时间 {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (ENDTIME {endtime_hms})，停止提交循环"
                         )
                         return suc
 
@@ -2457,11 +2464,29 @@ class reserve:
                 # 根据开关决定使用哪种验证码（两种验证码可以同时开启）
                 captcha = ""
                 if self.enable_rotate:
-                    captcha = self._resolve_rotate_captcha_with_retry(max_attempts=3)
-                    logging.info(f"Rotate captcha token: {captcha}")
+                    if not rotate_reusable_captcha:
+                        if rotate_consumed_captcha_count >= type(self).rotate_normal_consumed_captcha_limit:
+                            logging.warning(
+                                "旋转模式普通候补已达到最多消费 %d 个有效验证码的预算，停止候补",
+                                type(self).rotate_normal_consumed_captcha_limit,
+                            )
+                            return suc
+                        logging.info(
+                            "普通候补流程：先获取有效旋转滑块验证码，再检查座位是否空闲；"
+                            "有效验证码消费预算 %d/%d",
+                            rotate_consumed_captcha_count,
+                            type(self).rotate_normal_consumed_captcha_limit,
+                        )
+                        rotate_reusable_captcha = self._resolve_rotate_captcha_with_retry(max_attempts=3)
+                    else:
+                        logging.info(
+                            "普通候补流程：复用未提交消费的旋转滑块验证码，先查当前候补座位是否空闲"
+                        )
+                    captcha = rotate_reusable_captcha
+                    logging.info("旋转滑块验证码令牌：%s", captcha)
                     if not captcha:
                         logging.warning(
-                            "Skip current submit because rotate captcha is still empty after retry"
+                            "连续处理 3 个旋转滑块验证码后仍未拿到有效 validate，跳过当前候补座位"
                         )
                         time.sleep(self.sleep_time)
                         self.max_attempt -= 1
@@ -2510,10 +2535,10 @@ class reserve:
                     require_value=True,
                     method="GET",
                 )
-                logging.info(f"Get token from {page_url}: {token}")
+                logging.info(f"从 {page_url} 获取页面 token：{token}")
                 if not token:
                     logging.warning(
-                        "No submit_enc token fetched, break current submit loop and retry with new session"
+                        "未获取到 submit_enc token，结束当前提交循环并等待新 session 重试"
                     )
                     break
                 conflict = self.check_getusedtimes_conflict_sync(
@@ -2525,8 +2550,8 @@ class reserve:
                 )
                 if conflict is True:
                     logging.info(
-                        "[submit] Post-credential getusedtimes found seat conflict, "
-                        "discard this captcha/token pair and switch candidate: "
+                        "[提交] 拿到凭据后 getusedtimes 发现座位冲突，"
+                        "丢弃本次页面 token 并切换候选座位；验证码尚未提交，仍可复用："
                         "roomId=%s seatNum=%s day=%s",
                         slot_roomid,
                         seat,
@@ -2535,7 +2560,7 @@ class reserve:
                     break
                 if conflict is None:
                     logging.info(
-                        "[submit] Post-credential getusedtimes unknown, immediately submit current candidate: "
+                        "[提交] 拿到凭据后 getusedtimes 状态未知，立即提交当前候选座位："
                         "roomId=%s seatNum=%s",
                         slot_roomid,
                         seat,
@@ -2554,6 +2579,20 @@ class reserve:
                 )
                 if suc:
                     return suc
+                if self.enable_rotate and captcha:
+                    rotate_consumed_captcha_count += 1
+                    rotate_reusable_captcha = ""
+                    logging.info(
+                        "旋转滑块验证码已用于提交但未成功，按已消费处理：%d/%d",
+                        rotate_consumed_captcha_count,
+                        type(self).rotate_normal_consumed_captcha_limit,
+                    )
+                    if rotate_consumed_captcha_count >= type(self).rotate_normal_consumed_captcha_limit:
+                        logging.warning(
+                            "旋转模式普通候补已消费 %d 个有效验证码仍未成功，停止候补",
+                            rotate_consumed_captcha_count,
+                        )
+                        return suc
                 if self.enable_textclick and type(self).textclick_normal_request_count >= type(self).textclick_normal_request_limit:
                     self._abort_textclick_normal_flow_after_limit(type(self).textclick_normal_request_count)
                 time.sleep(self.sleep_time)

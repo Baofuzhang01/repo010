@@ -488,8 +488,8 @@ def _apply_strategy_config(config):
         and STRATEGY_SLIDER_LEAD_MS > STRATEGY_LOGIN_LEAD_SECONDS * 1000
     ):
         logging.warning(
-            "[strategic] Captcha preheat lead %dms exceeds login lead %ds; "
-            "actual captcha preheat cannot start before login completes",
+            "[策略] 验证码预热提前量 %dms 超过登录提前量 %ds；"
+            "实际验证码预热不能早于登录完成",
             STRATEGY_SLIDER_LEAD_MS,
             STRATEGY_LOGIN_LEAD_SECONDS,
         )
@@ -684,8 +684,8 @@ def _get_page_token_until_success(
 ):
     """正式获取页面 token；空 token 视为失败并持续刷新到 retry_until。"""
     logging.info(
-        f"[strategic] {label}: start formal token fetch from {token_url}"
-        + (f", retry until {retry_until}" if retry_until else "")
+        f"[策略] {label}：开始从 {token_url} 正式获取 token"
+        + (f"，持续重试到 {retry_until}" if retry_until else "")
     )
     token, value = s._get_page_token(
         token_url,
@@ -694,9 +694,9 @@ def _get_page_token_until_success(
         not_open_retry_interval=retry_interval,
     )
     if token:
-        logging.info(f"[strategic] {label}: got token from {token_url}: {token}")
+        logging.info(f"[策略] {label}：已从 {token_url} 获取 token：{token}")
     else:
-        logging.error(f"[strategic] {label}: token is empty after formal fetch")
+        logging.error(f"[策略] {label}：正式获取后 token 仍为空")
     return token, value
 
 
@@ -715,12 +715,12 @@ def _burst_shot_worker(
     _wait_until(fire_dt)
 
     logging.info(
-        f"[burst] Shot {index + 1} firing at {_beijing_now()} (target_dt + {offset_ms}ms)"
+        f"[burst] 第 {index + 1} 枪在 {_beijing_now()} 触发（目标时间 + {offset_ms}ms）"
     )
 
     if (ENABLE_ROTATE or ENABLE_SLIDER or ENABLE_TEXTCLICK or ENABLE_ICONCLICK) and not captcha:
         logging.error(
-            f"[burst] Shot {index + 1} has empty captcha, skip submit to avoid empty captcha"
+            f"[burst] 第 {index + 1} 枪验证码为空，跳过提交以避免空验证码"
         )
         results[index] = False
         return
@@ -731,11 +731,11 @@ def _burst_shot_worker(
             require_value=True,
         )
         if not token:
-            logging.error(f"[burst] Shot {index + 1} failed to get page token")
+            logging.error(f"[burst] 第 {index + 1} 枪获取页面 token 失败")
             results[index] = False
             return
         logging.info(
-            f"[burst] Shot {index + 1} fetched token on-the-fly from {token_url}: {token}"
+            f"[burst] 第 {index + 1} 枪从 {token_url} 即时获取 token：{token}"
         )
         result = s.get_submit(
             url=s.submit_url,
@@ -831,7 +831,7 @@ def strategic_first_attempt(
 
         # 今天不预约该配置，跳过
         if current_dayofweek not in daysofweek:
-            logging.info("[strategic] Today not set to reserve, skip this config")
+            logging.info("[策略] 今天不在预约星期配置内，跳过当前配置")
             continue
 
         # Actions 模式：根据索引或单账号覆盖用户名和密码
@@ -844,18 +844,18 @@ def strategic_first_attempt(
                 password = passwords_list[index]
             else:
                 logging.error(
-                    "[strategic] Index out of range for USERNAMES/PASSWORDS, skipping this config."
+                    "[策略] USERNAMES/PASSWORDS 索引越界，跳过当前配置"
                 )
                 continue
 
         # seatid 可能是字符串或列表，只在策略阶段针对第一个座位做一次精准尝试
         seat_list = [seatid] if isinstance(seatid, str) else seatid
         if not seat_list:
-            logging.error("[strategic] Empty seat list, skip this config")
+            logging.error("[策略] 座位列表为空，跳过当前配置")
             continue
 
         logging.info(
-            f"[strategic] Start first attempt for {username} -- {times} -- {seat_list} "
+            f"[策略] 开始策略首次尝试：{username} -- {times} -- {seat_list} "
             f"-- seatPageId={seat_page_id} -- fidEnc={fid_enc} -- use_custom_day={use_custom_day}"
         )
 
@@ -942,19 +942,19 @@ def strategic_first_attempt(
                 attempt += 1
                 if deadline_func is not None and deadline_func() <= 0:
                     logging.warning(
-                        f"[strategic] {log_name} {label} stopped before success: preheat deadline reached"
+                        f"[策略] {log_name} {label} 在成功前停止：已达到预热截止时间"
                     )
                     return ""
                 try:
                     captcha = captcha_session.resolve_captcha(captcha_type_name) or ""
                 except Exception as e:
                     logging.debug(
-                        f"[strategic] {log_name} {label} attempt {attempt} raised: {e}"
+                        f"[策略] {log_name} {label} 第 {attempt} 次处理异常：{e}"
                     )
                     captcha = ""
                 if captcha:
                     logging.info(
-                        f"[strategic] {log_name} {label} resolved on attempt {attempt}"
+                        f"[策略] {log_name} {label} 第 {attempt} 次处理成功"
                     )
                     return captcha
                 if max_retries is None or attempt < max_retries:
@@ -966,7 +966,7 @@ def strategic_first_attempt(
                             time.sleep(sleep_s)
 
             logging.warning(
-                f"[strategic] {log_name} {label} failed after {max_retries} attempts"
+                f"[策略] {log_name} {label} 请求 {max_retries} 次后仍失败"
             )
             return ""
 
@@ -996,22 +996,22 @@ def strategic_first_attempt(
                     break
 
                 logging.warning(
-                    f"[strategic] Login bootstrap failed for {username}, "
-                    f"retry within strategic window for {remaining_login_s:.2f}s more"
+                    f"[策略] {username} 登录预启动失败，"
+                    f"继续在策略窗口内重试 {remaining_login_s:.2f}s"
                 )
                 time.sleep(min(0.2, remaining_login_s))
 
             if not login_ok:
                 logging.warning(
-                    f"[strategic] Skip first attempt for {username}: login bootstrap failed "
-                    f"until strategic deadline {login_deadline}"
+                    f"[策略] 跳过 {username} 的策略首次尝试："
+                    f"直到策略截止时间 {login_deadline} 仍未登录成功"
                 )
                 continue
 
             if _beijing_now() >= target_dt:
                 logging.warning(
-                    f"[strategic] Login for {username} recovered after target time; "
-                    "continue strategic submits with reduced preheat budget"
+                    f"[策略] {username} 在目标时间后才恢复登录；"
+                    "继续策略提交，但预热预算已减少"
                 )
 
             s.set_captcha_context(
@@ -1073,7 +1073,7 @@ def strategic_first_attempt(
                 def _resolve_image_captcha_parallel(slot_idx: int) -> str:
                     if _remaining_captcha_seconds() <= 0:
                         logging.warning(
-                            f"[strategic] {active_captcha_type} captcha{slot_idx} skipped: preheat deadline reached"
+                            f"[策略] {active_captcha_type} captcha{slot_idx} 跳过：已达到预热截止时间"
                         )
                         return ""
 
@@ -1102,11 +1102,11 @@ def strategic_first_attempt(
                     if not captcha:
                         if _remaining_captcha_seconds() <= 0:
                             logging.warning(
-                                f"[strategic] {active_captcha_type} captcha{slot_idx} retry skipped: preheat deadline reached"
+                                f"[策略] {active_captcha_type} captcha{slot_idx} 重试跳过：已达到预热截止时间"
                             )
                             return ""
                         logging.warning(
-                            f"[strategic] {active_captcha_type} captcha{slot_idx} failed or empty, retrying once more"
+                            f"[策略] {active_captcha_type} captcha{slot_idx} 失败或为空，立即再试一次"
                         )
                         captcha = worker.resolve_captcha(active_captcha_type)
                     return captcha
@@ -1116,14 +1116,14 @@ def strategic_first_attempt(
                 remaining = _remaining_captcha_seconds()
                 if remaining <= 0:
                     logging.warning(
-                        f"[strategic] Captcha preheat budget exhausted before {active_captcha_type} starts, skip preheat"
+                        f"[策略] {active_captcha_type} 开始前验证码预热预算已耗尽，跳过预热"
                     )
                 else:
                     def _worker(slot_idx: int):
                         try:
                             captcha_results[slot_idx] = _resolve_image_captcha_parallel(slot_idx) or ""
                         except Exception as e:
-                            logging.warning(f"[strategic] {active_captcha_type} captcha{slot_idx} thread failed: {e}")
+                            logging.warning(f"[策略] {active_captcha_type} captcha{slot_idx} 线程失败：{e}")
                             captcha_results[slot_idx] = ""
 
                     deadline_mono = time.monotonic() + remaining
@@ -1150,7 +1150,7 @@ def strategic_first_attempt(
 
                     if remaining < 3:
                         logging.warning(
-                            "[strategic] Remaining captcha preheat budget < 3s, preheat slot1/slot2 first"
+                            "[策略] 剩余验证码预热预算小于 3 秒，优先预热 slot1/slot2"
                         )
                         first_two_threads = _start_threads([1, 2])
                         _join_threads_until_deadline(first_two_threads)
@@ -1158,13 +1158,13 @@ def strategic_first_attempt(
                         ready_count = sum(1 for i in [1, 2] if captcha_results[i])
                         if ready_count >= 1:
                             logging.warning(
-                                "[strategic] Budget < 3s and captcha1/2 already ready, skip captcha3 preheat"
+                                "[策略] 预算小于 3 秒且 captcha1/2 已有结果，跳过 captcha3 预热"
                             )
                         else:
                             timeout_left = deadline_mono - time.monotonic()
                             if timeout_left > 0:
                                 logging.warning(
-                                    "[strategic] Budget < 3s and captcha1/2 empty, try captcha3 as fallback"
+                                    "[策略] 预算小于 3 秒且 captcha1/2 为空，尝试 captcha3 作为兜底"
                                 )
                                 third_threads = _start_threads([3])
                                 _join_threads_until_deadline(third_threads)
@@ -1175,9 +1175,9 @@ def strategic_first_attempt(
                 captcha1 = captcha_results[1]
                 captcha2 = captcha_results[2]
                 captcha3 = captcha_results[3]
-                logging.info(f"[strategic] Pre-resolved {active_captcha_type} captcha1: {captcha1}")
-                logging.info(f"[strategic] Pre-resolved {active_captcha_type} captcha2: {captcha2}")
-                logging.info(f"[strategic] Pre-resolved {active_captcha_type} captcha3: {captcha3}")
+                logging.info(f"[策略] 已预处理 {active_captcha_type} captcha1：{captcha1}")
+                logging.info(f"[策略] 已预处理 {active_captcha_type} captcha2：{captcha2}")
+                logging.info(f"[策略] 已预处理 {active_captcha_type} captcha3：{captcha3}")
             elif ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
                 captcha_results = {1: "", 2: "", 3: ""}
                 live_captcha_results = captcha_results
@@ -1257,13 +1257,13 @@ def strategic_first_attempt(
                 fid_enc=fid_enc,
             )
             logging.info(
-                f"[strategic] Reuse preheated session from {shared_strategy_username} for {username}; "
-                "skip login and captcha preheat"
+                f"[策略] {username} 复用 {shared_strategy_username} 的已预热 session；"
+                "跳过登录和验证码预热"
             )
             if ENABLE_SLIDER:
                 active_captcha_type = "slide"
                 logging.info(
-                    f"[strategic] Captcha preheat skipped for this config; resolve {active_captcha_type} captchas on demand"
+                    f"[策略] 当前配置跳过验证码预热，按需获取 {active_captcha_type} 验证码"
                 )
                 captcha1 = s.resolve_captcha(active_captcha_type) or ""
                 captcha2 = s.resolve_captcha(active_captcha_type) or ""
@@ -1296,7 +1296,7 @@ def strategic_first_attempt(
         if (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE) and captcha1:
             captchas_for_submit = [captcha1, captcha1, captcha1]
             logging.info(
-                f"[strategic] Reuse one preheated {captcha_type} captcha for the first three submits"
+                f"[策略] 已准备第一个{click_captcha_name}验证码；后续每次真正提交后都会按已消费处理，失败续枪会优先换新验证码"
             )
         else:
             captchas_for_submit = [captcha for captcha in raw_captchas if captcha]
@@ -1309,19 +1309,19 @@ def strategic_first_attempt(
         )
         if captcha_required and captchas_for_submit != raw_captchas and not expected_single_reused_captcha:
             logging.warning(
-                "[strategic] Normalize captcha submit order to avoid empty captcha: "
-                f"raw={raw_captchas}, non_empty_count={len(captchas_for_submit)}"
+                "[策略] 为避免空验证码提交，已整理验证码提交顺序："
+                f"原始={raw_captchas}，非空数量={len(captchas_for_submit)}"
             )
         elif expected_single_reused_captcha:
             logging.info(
-                f"[strategic] {captcha_type} submit order uses one prepared captcha "
-                "for the first three submits"
+                f"[策略] {click_captcha_name}提交队列先占位使用已准备验证码；"
+                "每次真正提交后会视为已消费并按需换新"
             )
         captchas_for_submit = (captchas_for_submit + ["", "", ""])[:3]
         captcha1, captcha2, captcha3 = captchas_for_submit
         if captcha_required:
             logging.info(
-                "[strategic] Captcha submit order after normalization: "
+                "[策略] 验证码提交队列整理后："
                 f"captcha1={captcha1}, captcha2={captcha2}, captcha3={captcha3}"
             )
 
@@ -1334,7 +1334,7 @@ def strategic_first_attempt(
                 if live_first and not captchas_for_submit[0]:
                     captchas_for_submit[:] = [live_first, live_first, live_first]
                     logging.info(
-                        f"[strategic] Refreshed reused {captcha_type} captcha from late preheat result"
+                        f"[策略] 收到稍晚返回的{click_captcha_name}预热结果，已刷新提交队列"
                     )
                 return
 
@@ -1354,7 +1354,7 @@ def strategic_first_attempt(
             if refreshed != captchas_for_submit:
                 captchas_for_submit[:] = refreshed
                 logging.info(
-                    "[strategic] Refreshed captcha submit order from late preheat results: "
+                    "[策略] 根据稍晚返回的预热结果刷新验证码提交队列："
                     f"live={live_captchas}, captcha1={captchas_for_submit[0]}, "
                     f"captcha2={captchas_for_submit[1]}, captcha3={captchas_for_submit[2]}"
                 )
@@ -1444,8 +1444,8 @@ def strategic_first_attempt(
                 return
 
             logging.info(
-                f"[strategic] {reason}; immediately resolve a fresh slide captcha "
-                f"for submit shot {shot_idx} and replace any preheated captcha"
+                f"[策略] {reason}；立即为第 {shot_idx} 次提交获取新的滑块验证码，"
+                "并替换已有预热验证码"
             )
             captchas_for_submit[list_idx] = ""
             captcha = s.resolve_captcha("slide") or ""
@@ -1453,7 +1453,7 @@ def strategic_first_attempt(
                 captchas_for_submit[list_idx] = captcha
             else:
                 logging.warning(
-                    f"[strategic] Failed to prepare slide captcha for submit shot {shot_idx}"
+                    f"[策略] 为第 {shot_idx} 次提交准备滑块验证码失败"
                 )
 
         def _prepare_fresh_captcha_for_submit(shot_idx: int, reason: str, *, max_retries=None):
@@ -1485,14 +1485,13 @@ def strategic_first_attempt(
 
             if (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE) and shot_idx == 1:
                 logging.error(
-                    f"[strategic] {captcha_type} captcha1 is still empty when submit shot 1 needs it; "
-                    "skip this strategic submit instead of resolving after token fetch"
+                    f"[策略] 第 1 次提交需要{click_captcha_name}验证码时仍为空；"
+                    "跳过本次策略提交，不在取 token 后临时补验证码"
                 )
                 return None
 
             logging.warning(
-                f"[strategic] Captcha for submit shot {shot_idx} is empty, "
-                f"resolve {captcha_type} captcha on demand before submit"
+                f"[策略] 第 {shot_idx} 次提交验证码为空，提交前按需获取{click_captcha_name}验证码"
             )
             if ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
                 captcha = _resolve_textclick_with_retries(
@@ -1506,14 +1505,12 @@ def strategic_first_attempt(
                 if 0 <= list_idx < len(captchas_for_submit):
                     captchas_for_submit[list_idx] = captcha
                 logging.info(
-                    f"[strategic] On-demand {captcha_type} captcha for submit shot "
-                    f"{shot_idx}: {captcha}"
+                    f"[策略] 第 {shot_idx} 次提交按需获取到{click_captcha_name}验证码：{captcha}"
                 )
                 return captcha
 
             logging.error(
-                f"[strategic] Submit shot {shot_idx} has no captcha after on-demand "
-                "resolve, skip submit to avoid empty captcha"
+                f"[策略] 第 {shot_idx} 次提交按需获取后仍无验证码，跳过提交以避免空验证码"
             )
             return None
 
@@ -1530,8 +1527,8 @@ def strategic_first_attempt(
 
             if _beijing_now() < hard_deadline:
                 logging.warning(
-                    f"[strategic] {captcha_type} captcha1 empty before token stage; "
-                    f"continue resolving until {hard_deadline} before fetching token"
+                    f"[策略] 取 token 前第一个{click_captcha_name}验证码仍为空；"
+                    f"继续处理到 {hard_deadline} 后再进入 token 阶段"
                 )
 
                 if (
@@ -1549,8 +1546,7 @@ def strategic_first_attempt(
                     _refresh_submit_captchas_from_live_results()
                     if captchas_for_submit[0]:
                         logging.info(
-                            f"[strategic] {captcha_type} captcha1 received from existing "
-                            "preheat thread before strategic token fetch"
+                            f"[策略] 取策略 token 前，已从现有预热线程收到第一个{click_captcha_name}验证码"
                         )
                         return True
 
@@ -1578,13 +1574,13 @@ def strategic_first_attempt(
             _refresh_submit_captchas_from_live_results()
             if captchas_for_submit[0]:
                 logging.info(
-                    f"[strategic] {captcha_type} captcha1 is ready before strategic token fetch"
+                    f"[策略] 取策略 token 前，第一个{click_captcha_name}验证码已就绪"
                 )
                 return True
 
             logging.error(
-                f"[strategic] {captcha_type} captcha1 is empty at the hard deadline; "
-                "skip first strategic submit and continue follow-up shots"
+                f"[策略] 到硬截止点第一个{click_captcha_name}验证码仍为空；"
+                "跳过第一枪策略提交，继续后续第二/第三枪"
             )
             return False
 
@@ -1623,7 +1619,7 @@ def strategic_first_attempt(
             conflict = _getusedtimes_conflict_ready(handle)
             if conflict is None:
                 logging.info(
-                    "[strategic] %s getusedtimes not ready before submit, keep primary seat %s/%s",
+                    "[策略] %s 提交前 getusedtimes 尚未就绪，保留主座位 %s/%s",
                     label,
                     roomid,
                     first_seat,
@@ -1631,7 +1627,7 @@ def strategic_first_attempt(
                 return roomid, first_seat, seat_page_id, fid_enc, token, value
             if conflict is False:
                 logging.info(
-                    "[strategic] %s primary seat %s/%s is not conflicted, keep primary",
+                    "[策略] %s 主座位 %s/%s 未冲突，继续使用主座位",
                     label,
                     roomid,
                     first_seat,
@@ -1656,7 +1652,7 @@ def strategic_first_attempt(
                     )
                     if backup_conflict is True:
                         logging.info(
-                            "[strategic] %s backup %s/%s also conflicted, keep trying next backup",
+                            "[策略] %s 候补座位 %s/%s 也已冲突，继续尝试下一个候补",
                             label,
                             backup_room,
                             backup_seat,
@@ -1664,7 +1660,7 @@ def strategic_first_attempt(
                         continue
                 claimed_backup_seats.add(backup_key)
                 logging.info(
-                    "[strategic] %s primary seat %s/%s conflicted, switch to backup %s/%s",
+                    "[策略] %s 主座位 %s/%s 已冲突，切换到候补 %s/%s",
                     label,
                     roomid,
                     first_seat,
@@ -1690,7 +1686,7 @@ def strategic_first_attempt(
                     if backup_token:
                         return backup_room, backup_seat, backup_page_id, backup_fid, backup_token, backup_value
                     logging.warning(
-                        "[strategic] %s backup %s/%s token fetch failed, keep trying next backup",
+                        "[策略] %s 候补 %s/%s 获取 token 失败，继续尝试下一个候补",
                         label,
                         backup_room,
                         backup_seat,
@@ -1729,7 +1725,7 @@ def strategic_first_attempt(
                     continue
                 if fallback_key in strategic_primary_seats or fallback_key in claimed_backup_seats:
                     logging.info(
-                        "[strategic] %s ordered fallback %s/%s skipped because it is already active/claimed",
+                        "[策略] %s 有序兜底座位 %s/%s 已在使用或已被占用，跳过",
                         label,
                         fallback_base_room,
                         fallback_seat,
@@ -1745,7 +1741,7 @@ def strategic_first_attempt(
                     )
                     if fallback_conflict is True:
                         logging.info(
-                            "[strategic] %s ordered fallback %s/%s skipped because getusedtimes is conflicted",
+                            "[策略] %s 有序兜底座位 %s/%s 因 getusedtimes 冲突而跳过",
                             label,
                             fallback_base_room,
                             fallback_seat,
@@ -1755,11 +1751,11 @@ def strategic_first_attempt(
                 if used_for_config is not None:
                     used_for_config.add(fallback_seat)
                 logging.info(
-                    "[strategic] %s primary seat %s/%s conflicted and %s, use ordered fallback from %s/%s -> %s/%s (%s)",
+                    "[策略] %s 主座位 %s/%s 已冲突且%s，使用有序兜底 %s/%s -> %s/%s（%s）",
                     label,
                     roomid,
                     first_seat,
-                    "backupSeats exhausted" if backup_slots else "backupSeats empty",
+                    "候补座位已用尽" if backup_slots else "候补座位为空",
                     fallback_base_room,
                     fallback_base_seat,
                     fallback_base_room,
@@ -1785,7 +1781,7 @@ def strategic_first_attempt(
                     if fallback_token:
                         return fallback_base_room, fallback_seat, fallback_page_id, fallback_fid, fallback_token, fallback_value
                     logging.warning(
-                        "[strategic] %s ordered fallback %s/%s token fetch failed, keep primary",
+                        "[策略] %s 有序兜底座位 %s/%s 获取 token 失败，保留主座位",
                         label,
                         fallback_base_room,
                         fallback_seat,
@@ -1794,7 +1790,7 @@ def strategic_first_attempt(
                 return fallback_base_room, fallback_seat, fallback_page_id, fallback_fid, token, value
 
             logging.warning(
-                "[strategic] %s primary seat conflicted but no usable backupSeats, keep primary %s/%s",
+                "[策略] %s 主座位已冲突，但没有可用候补座位，保留主座位 %s/%s",
                 label,
                 roomid,
                 first_seat,
@@ -1837,8 +1833,8 @@ def strategic_first_attempt(
         use_serial_followups = skip_first_strategic_submit and SUBMIT_MODE == "burst"
         if use_serial_followups:
             logging.warning(
-                "[strategic] Captcha1 missed hard deadline in burst mode; "
-                "skip the expired burst schedule and continue with serial second/third shots"
+                "[策略] burst 模式下第一个验证码错过硬截止点；"
+                "跳过已过期的连发计划，改用串行第二/第三枪"
             )
 
         if SUBMIT_MODE == "burst" and not use_serial_followups:
@@ -1847,7 +1843,7 @@ def strategic_first_attempt(
             for shot_idx in range(2, n_shots + 1):
                 _prepare_fresh_captcha_for_submit(
                     shot_idx,
-                    "Burst shots must use independent captcha values because every reservation POST consumes one",
+                    "burst 连发每次预约 POST 都会消费一个验证码，因此每枪必须使用独立验证码",
                     max_retries=None,
                 )
             captchas_list = (
@@ -1878,8 +1874,8 @@ def strategic_first_attempt(
             )
             token_submit_lock = threading.Lock()
             logging.info(
-                "[strategic] [burst] Only the first shot performs seat conflict selection; "
-                "all shots fetch a fresh one-time page token/value inside the token-submit lock"
+                "[策略] [burst] 只在第一枪前选择座位冲突结果；"
+                "所有枪都在 token-submit 锁内获取全新一次性页面 token/value"
             )
 
             burst_results = [None] * n_shots
@@ -1899,8 +1895,8 @@ def strategic_first_attempt(
                 threads.append(t)
 
             logging.info(
-                f"[strategic] [burst] Launching {len(threads)} shots at offsets "
-                f"{BURST_OFFSETS_MS} ms from target_dt"
+                f"[策略] [burst] 启动 {len(threads)} 枪，目标时间偏移为 "
+                f"{BURST_OFFSETS_MS} ms"
             )
             for t in threads:
                 t.start()
@@ -1909,7 +1905,7 @@ def strategic_first_attempt(
 
             suc = any(r for r in burst_results if r)
             logging.info(
-                f"[strategic] [burst] All shots done, results: {burst_results}, overall success: {suc}"
+                f"[策略] [burst] 所有提交完成，结果：{burst_results}，整体是否成功：{suc}"
             )
 
         else:
@@ -1943,8 +1939,8 @@ def strategic_first_attempt(
 
             if skip_first_strategic_submit:
                 logging.warning(
-                    "[strategic] First submit skipped because captcha1 missed hard deadline; "
-                    "continue directly with second strategic shot"
+                    "[策略] 第一次提交因第一个验证码错过硬截止点而跳过；"
+                    "直接继续第二枪策略提交"
                 )
                 s.last_submit_result = None
                 suc = False
@@ -1968,12 +1964,12 @@ def strategic_first_attempt(
                     ),
                 )
                 if not token1:
-                    logging.error("[strategic] [C] Token fetch failed, skip this config")
+                    logging.error("[策略] [C] 获取 token 失败，跳过当前配置")
                     continue
                 if SKIP_FIRST_SEAT_QUERY:
                     logging.info(
-                        f"[strategic] [C] Got token from {_first_token_url}: {token1}; "
-                        "first submit skips seat getusedtimes and immediately uses primary seat"
+                        f"[策略] [C] 已从 {_first_token_url} 获取 token：{token1}；"
+                        "第一枪跳过 getusedtimes 查座，直接使用主座位"
                     )
                     submit_room = roomid
                     submit_seat = first_seat
@@ -1981,8 +1977,8 @@ def strategic_first_attempt(
                     submit_fid = fid_enc
                 else:
                     logging.info(
-                        f"[strategic] [C] Got token from {_first_token_url}: {token1}; "
-                        "first submit checks seat getusedtimes before submit"
+                        f"[策略] [C] 已从 {_first_token_url} 获取 token：{token1}；"
+                        "第一枪提交前先检查 getusedtimes"
                     )
                     used_handle1 = s.post_getusedtimes_after_token(
                         times,
@@ -2025,8 +2021,8 @@ def strategic_first_attempt(
                 token_retry_until = target_dt + datetime.timedelta(seconds=40)
                 _wait_until(pre_fetch_dt)
                 logging.info(
-                    f"[strategic] [A] Formal pre-fetch page token at {_beijing_now()} "
-                    f"(target_dt - {PRE_FETCH_TOKEN_MS}ms) from {_first_token_url}"
+                    f"[策略] [A] 在 {_beijing_now()} 正式预取页面 token "
+                    f"（目标时间 - {PRE_FETCH_TOKEN_MS}ms），链接：{_first_token_url}"
                 )
                 token1, value1 = _get_page_token_until_success(
                     s,
@@ -2037,17 +2033,17 @@ def strategic_first_attempt(
                     label="[A] First token",
                 )
                 if not token1:
-                    logging.error("[strategic] [A] First token is empty, skip this config")
+                    logging.error("[策略] [A] 第一枪 token 为空，跳过当前配置")
                     continue
 
                 submit_dt1 = target_dt + datetime.timedelta(milliseconds=FIRST_SUBMIT_OFFSET_MS)
                 _wait_until(submit_dt1)
                 logging.info(
-                    f"[strategic] [A] First submit at {_beijing_now()} (target_dt + {FIRST_SUBMIT_OFFSET_MS}ms)"
+                    f"[策略] [A] 第一枪提交时间 {_beijing_now()}（目标时间 + {FIRST_SUBMIT_OFFSET_MS}ms）"
                 )
                 if SKIP_FIRST_SEAT_QUERY:
                     logging.info(
-                        "[strategic] [A] First submit skips seat getusedtimes and immediately uses primary seat"
+                        "[策略] [A] 第一枪跳过 getusedtimes 查座，直接使用主座位"
                     )
                     submit_room = roomid
                     submit_seat = first_seat
@@ -2092,7 +2088,7 @@ def strategic_first_attempt(
                 token_fetch_dt1 = target_dt + datetime.timedelta(milliseconds=FIRST_SUBMIT_OFFSET_MS)
                 _wait_until(token_fetch_dt1)
                 logging.info(
-                    f"[strategic] [B] Fetch page token at {_beijing_now()} (target_dt + {FIRST_SUBMIT_OFFSET_MS}ms)"
+                    f"[策略] [B] 在 {_beijing_now()} 获取页面 token（目标时间 + {FIRST_SUBMIT_OFFSET_MS}ms）"
                 )
                 token1, value1 = _probe_then_get_page_token(
                     s,
@@ -2103,11 +2099,10 @@ def strategic_first_attempt(
                     not_open_retry_interval=0.005,
                 )
                 if not token1:
-                    logging.error("[strategic] Failed to get page token for first submit, skip this config")
+                    logging.error("[策略] 第一枪获取页面 token 失败，跳过当前配置")
                     continue
                 logging.info(
-                    f"[strategic] Got page token for first submit from {_first_token_url}: "
-                    f"{token1}, value: {value1}"
+                    f"[策略] 第一枪已从 {_first_token_url} 获取页面 token：{token1}，value：{value1}"
                 )
                 used_handle1 = s.post_getusedtimes_after_token(
                     times,
@@ -2116,7 +2111,7 @@ def strategic_first_attempt(
                     submit_day,
                     fid_enc=fid_enc,
                 )
-                logging.info(f"[strategic] [B] Immediately submit after fetching page token")
+                logging.info("[策略] [B] 获取页面 token 后立即提交")
                 submit_room, submit_seat, submit_page_id, submit_fid, token1, value1 = _maybe_switch_to_backup(
                     used_handle1,
                     token1,
@@ -2147,19 +2142,19 @@ def strategic_first_attempt(
             if not suc:
                 if not skip_first_strategic_submit and s.should_skip_followup_submit():
                     logging.info(
-                        "[strategic] First submit hit terminal failure msg, skip second/third submit"
+                        "[策略] 第一枪命中终止型失败信息，跳过第二/第三枪"
                     )
                     success_list[index] = suc
                     continue
-                logging.info("[strategic] First submit failed, prepare second submit with NEW page token")
+                logging.info("[策略] 第一枪未成功，准备使用新的页面 token 进行第二枪提交")
                 first_failure_msg = _last_submit_failure_msg()
                 first_submit_sent = 1 in serial_submitted_shots
                 logging.info(
-                    "[strategic] First submit failure reason: %s; submit_sent=%s",
+                    "[策略] 第一枪失败原因：%s；是否已发送提交=%s",
                     (
-                        "captcha1 missed hard deadline"
+                        "第一个验证码错过硬截止点"
                         if skip_first_strategic_submit
-                        else (first_failure_msg or "<empty>")
+                        else (first_failure_msg or "<空>")
                     ),
                     first_submit_sent,
                 )
@@ -2167,9 +2162,9 @@ def strategic_first_attempt(
                     _prepare_fresh_captcha_for_submit(
                         2,
                         (
-                            "First submit sent a reservation POST, so its captcha is consumed"
+                            "第一枪已发送预约 POST，因此验证码按已消费处理"
                             if first_submit_sent
-                            else "First submit was skipped because captcha1 missed the hard deadline"
+                            else "第一枪因第一个验证码错过硬截止点被跳过"
                         ),
                         max_retries=3 if skip_first_strategic_submit else None,
                     )
@@ -2189,10 +2184,10 @@ def strategic_first_attempt(
                         require_value=True,
                     )
                 if not token2:
-                    logging.error("[strategic] Failed to get page token for second submit, skip to third/normal flow")
+                    logging.error("[策略] 第二枪获取页面 token 失败，跳到第三枪/普通流程")
                 else:
                     logging.info(
-                        "[strategic] Second submit skips seat query and immediately uses NEW captcha + page token"
+                        "[策略] 第二枪跳过查座，立即使用新的验证码 + 页面 token 提交"
                     )
                     submit_captcha2 = _get_submit_captcha(2)
                     if submit_captcha2 is None:
@@ -2216,29 +2211,28 @@ def strategic_first_attempt(
             if not suc:
                 if s.should_skip_followup_submit():
                     logging.info(
-                        "[strategic] Second submit hit terminal failure msg, skip third submit"
+                        "[策略] 第二枪命中终止型失败信息，跳过第三枪"
                     )
                     success_list[index] = suc
                     continue
-                logging.info("[strategic] Second submit failed, prepare third submit with NEW page token")
+                logging.info("[策略] 第二枪未成功，准备使用新的页面 token 进行第三枪提交")
                 second_failure_msg = _last_submit_failure_msg()
                 second_submit_sent = 2 in serial_submitted_shots
                 logging.info(
-                    "[strategic] Second submit failure reason: %s; submit_sent=%s",
-                    second_failure_msg or "<empty>",
+                    "[策略] 第二枪失败原因：%s；是否已发送提交=%s",
+                    second_failure_msg or "<空>",
                     second_submit_sent,
                 )
                 if second_submit_sent:
                     _prepare_fresh_captcha_for_submit(
                         3,
-                        "Second submit sent a reservation POST, so its captcha is consumed",
+                        "第二枪已发送预约 POST，因此验证码按已消费处理",
                         max_retries=None,
                     )
                 elif captcha_required and captchas_for_submit[1]:
                     captchas_for_submit[2] = captchas_for_submit[1]
                     logging.info(
-                        "[strategic] Second submit did not send a reservation POST; "
-                        "reuse its unconsumed fresh captcha for third submit"
+                        "[策略] 第二枪没有发送预约 POST；第三枪复用第二枪未消费的新验证码"
                     )
 
                 token3, value3 = s._get_page_token(
@@ -2246,10 +2240,10 @@ def strategic_first_attempt(
                     require_value=True,
                 )
                 if not token3:
-                    logging.error("[strategic] Failed to get page token for third submit, give up strategic submits for this config")
+                    logging.error("[策略] 第三枪获取页面 token 失败，放弃当前配置的策略提交")
                 else:
                     logging.info(
-                        "[strategic] Third submit skips seat query and immediately uses NEW captcha + page token"
+                        "[策略] 第三枪跳过查座，立即使用新的验证码 + 页面 token 提交"
                     )
                     submit_captcha3 = _get_submit_captcha(3)
                     if submit_captcha3 is None:
@@ -2326,7 +2320,7 @@ def login_and_reserve(
                 password = passwords_list[index]
             else:
                 logging.error(
-                    "Index out of range for USERNAMES/PASSWORDS, skipping this config."
+                    "USERNAMES/PASSWORDS 索引越界，跳过当前配置"
                 )
                 continue
 
@@ -2354,7 +2348,7 @@ def login_and_reserve(
                     )
                     if not s.bootstrap_login(username, password):
                         logging.warning(
-                            f"Skip current attempt for {username}: login bootstrap failed"
+                            f"跳过 {username} 本轮尝试：登录预启动失败"
                         )
                         continue
                     sessions[index] = s
@@ -2376,7 +2370,7 @@ def login_and_reserve(
                 )
                 if not s.bootstrap_login(username, password):
                     logging.warning(
-                        f"Skip current attempt for {username}: login bootstrap failed"
+                        f"跳过 {username} 本轮尝试：登录预启动失败"
                     )
                     continue
 
@@ -2440,6 +2434,7 @@ def main(users, action=False):
             )
             original_seatids.append(None)
     seat_increment_attempts = 0
+    fallback_attempt_limit = MAX_SEAT_INCREMENT_ATTEMPTS
     fallback_used_seats = [set() for _ in users]
 
     while True:
@@ -2478,9 +2473,9 @@ def main(users, action=False):
                         )
                         if not new_seat:
                             logging.info(
-                                f"[seat-ordered-after-strategic] Config {i}: skip invalid/used fallback "
-                                f"(base {original_seatids[i]}, offset {offset or 'none'}, "
-                                f"attempt {seat_increment_attempts}/{MAX_SEAT_INCREMENT_ATTEMPTS})"
+                            f"[seat-ordered-after-strategic] Config {i}: skip invalid/used fallback "
+                            f"(base {original_seatids[i]}, offset {offset or 'none'}, "
+                            f"attempt {seat_increment_attempts}/{fallback_attempt_limit})"
                             )
                             continue
                         fallback_used_seats[i].add(new_seat)
@@ -2488,7 +2483,7 @@ def main(users, action=False):
                         logging.info(
                             f"[seat-ordered-after-strategic] Config {i}: try seat {new_seat} "
                             f"(base {original_seatids[i]}, offset {offset}, "
-                            f"attempt {seat_increment_attempts}/{MAX_SEAT_INCREMENT_ATTEMPTS})"
+                            f"attempt {seat_increment_attempts}/{fallback_attempt_limit})"
                         )
                 # 递增座位后立即调用 login_and_reserve（每个座位只试一次）
                 MAX_ATTEMPT = 1
@@ -2502,10 +2497,10 @@ def main(users, action=False):
         else:
             # 预热结束后仍未成功：未成功配置继续按固定顺序补位尝试
             if success_list is not None and sum(success_list) < today_reservation_num:
-                if seat_increment_attempts >= MAX_SEAT_INCREMENT_ATTEMPTS:
+                if seat_increment_attempts >= fallback_attempt_limit:
                     logging.info(
                         f"[seat-ordered] Reached max fallback attempts "
-                        f"{MAX_SEAT_INCREMENT_ATTEMPTS}, stop fallback seat changes"
+                        f"{fallback_attempt_limit}, stop fallback seat changes"
                     )
                     print(
                         f"ordered fallback stopped after {seat_increment_attempts} attempts, "
@@ -2523,9 +2518,9 @@ def main(users, action=False):
                         )
                         if not new_seat:
                             logging.info(
-                                f"[seat-ordered] Config {i}: skip invalid/used fallback "
-                                f"(base {original_seatids[i]}, offset {offset or 'none'}, "
-                                f"attempt {seat_increment_attempts}/{MAX_SEAT_INCREMENT_ATTEMPTS})"
+                            f"[seat-ordered] Config {i}: skip invalid/used fallback "
+                            f"(base {original_seatids[i]}, offset {offset or 'none'}, "
+                            f"attempt {seat_increment_attempts}/{fallback_attempt_limit})"
                             )
                             continue
                         fallback_used_seats[i].add(new_seat)
@@ -2533,7 +2528,7 @@ def main(users, action=False):
                         logging.info(
                             f"[seat-ordered] Config {i}: try seat {new_seat} "
                             f"(base {original_seatids[i]}, offset {offset}, "
-                            f"attempt {seat_increment_attempts}/{MAX_SEAT_INCREMENT_ATTEMPTS})"
+                            f"attempt {seat_increment_attempts}/{fallback_attempt_limit})"
                         )
 
                 # 固定顺序补位模式下每个座位只提交一次，失败就下一轮切换到下一个偏移
