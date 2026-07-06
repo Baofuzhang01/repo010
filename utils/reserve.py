@@ -35,6 +35,21 @@ def _should_save_captcha_debug_images() -> bool:
     return os.getenv("SAVE_CAPTCHA_DEBUG_IMAGES", "0").lower() in {"1", "true", "yes", "on"}
 
 
+def _crop_iconclick_visible_area(image_bytes: bytes) -> bytes:
+    """裁掉图标点选验证码底部未展示/干扰区域，返回可提交给 OCR 的 JPEG。"""
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return b""
+    image = image[:180]
+    ok, encoded = cv2.imencode(".jpg", image)
+    if not ok:
+        return b""
+    return encoded.tobytes()
+
+
 def _get_chaojiying_config():
     """从环境变量或 config.json 获取超级鹰配置。
     
@@ -254,6 +269,7 @@ class reserve:
         self.fail_dict = []
         self.submit_msg = []
         self.last_submit_result = None
+        self.rotate_captcha_processed_count = 0
         self._used_submit_values = set()
         self._used_submit_values_lock = threading.Lock()
         self.requests = requests.session()
@@ -1295,6 +1311,11 @@ class reserve:
                 time.monotonic() - image_download_started,
                 len(image_response.content),
             )
+            cropped_image_bytes = _crop_iconclick_visible_area(image_response.content)
+            if not cropped_image_bytes:
+                logging.warning("图标验证码图片裁剪失败")
+                return ""
+
             if self.iconclick_ocr_provider == "tulingcloud":
                 from utils.captcha_ocr import TulingCloudOCR
 
@@ -1304,12 +1325,12 @@ class reserve:
                 if not all([username, password, model_id]):
                     logging.error("未配置图灵云图标点选所需的账号信息")
                     return ""
-                logging.info("图标点选使用图灵云识别，model_id=%s，提交原图", model_id)
+                logging.info("图标点选使用图灵云识别，model_id=%s，提交裁剪图", model_id)
                 positions = TulingCloudOCR(
                     username=username,
                     password=password,
                     model_id=model_id,
-                ).recognize_iconclick(image_response.content)
+                ).recognize_iconclick(cropped_image_bytes)
             elif self.iconclick_ocr_provider == "jfbym":
                 from utils.captcha_ocr import JfbymOCR
 
@@ -1328,16 +1349,6 @@ class reserve:
             else:
                 from utils.captcha_ocr import ChaojiyingOCR
 
-                image = cv2.imdecode(
-                    np.frombuffer(image_response.content, np.uint8), cv2.IMREAD_COLOR
-                )
-                if image is None:
-                    return ""
-                image = image[:180]
-                ok, encoded = cv2.imencode(".jpg", image)
-                if not ok:
-                    return ""
-
                 username, password, soft_id, _ = _get_chaojiying_config()
                 if not all([username, password, soft_id]):
                     logging.error("未配置图标点选所需的超级鹰账号信息")
@@ -1345,7 +1356,7 @@ class reserve:
                 logging.info("图标点选使用超级鹰 9103 识别")
                 positions = ChaojiyingOCR(
                     username, password, soft_id, codetype=9103
-                ).recognize_iconclick(encoded.tobytes())
+                ).recognize_iconclick(cropped_image_bytes)
         except Exception as e:
             logging.warning("图标点选识别失败：%s", e)
             return ""
@@ -1364,20 +1375,24 @@ class reserve:
 
     def _resolve_rotate_captcha(self):
         """旋转滑块验证码求解。"""
-        logging.info("Start to resolve rotate captcha token")
+        self.rotate_captcha_processed_count += 1
+        logging.info(
+            "开始处理旋转滑块验证码（累计第 %d 个）",
+            self.rotate_captcha_processed_count,
+        )
         captcha_token, captcha_iv, shade_url, cutout_url = self.get_rotate_captcha_data()
         if not captcha_token or not shade_url or not cutout_url:
-            logging.warning("Failed to get rotate captcha payload")
+            logging.warning("获取旋转滑块验证码数据失败")
             return ""
 
         solve = self._recognize_rotate_x(shade_url, cutout_url)
         if not solve:
-            logging.warning("Rotate captcha recognition failed before submit")
+            logging.warning("旋转滑块识别失败，本次不提交")
             return ""
 
         x = solve["x"]
         logging.info(
-            "Successfully recognize rotate captcha: angle=%s, x=%s",
+            "旋转滑块识别成功：角度=%s，坐标 x=%s",
             solve["angle"],
             x,
         )
@@ -1387,19 +1402,23 @@ class reserve:
         """图灵云识别失败时不提交当前验证码，直接重新取一组 rotate。"""
         attempts = max(1, int(max_attempts))
         for attempt in range(1, attempts + 1):
+            logging.info("正在处理第 %d/%d 个旋转滑块验证码", attempt, attempts)
             captcha = self._resolve_rotate_captcha()
             if captcha:
-                if attempt > 1:
-                    logging.info(
-                        f"Rotate captcha token resolved on retry attempt {attempt}/{attempts}"
-                    )
+                logging.info(
+                    "旋转滑块处理成功：本轮共处理 %d 个验证码",
+                    attempt,
+                )
                 return captcha
             if attempt < attempts:
                 logging.warning(
-                    f"Rotate captcha token is empty on attempt {attempt}/{attempts}, fetch a new captcha"
+                    "第 %d/%d 个旋转滑块验证码失败，重新获取下一张",
+                    attempt,
+                    attempts,
                 )
         logging.error(
-            f"Rotate captcha token remains empty after {attempts} attempts, skip submit"
+            "旋转滑块处理失败：本轮共处理 %d 个验证码，跳过提交",
+            attempts,
         )
         return ""
 
@@ -1634,10 +1653,11 @@ class reserve:
                 request_name="rotate captcha submit",
             )
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Failed to submit rotate captcha: {e}")
+            logging.warning("提交旋转滑块验证码失败：%s", e)
             return ""
 
         text = response.text.strip()
+        logging.info("旋转滑块原始响应：%s", text)
         if text.startswith("cx_captcha_function("):
             text = text[len("cx_captcha_function("):]
             if text.endswith(")"):
@@ -1645,18 +1665,17 @@ class reserve:
         try:
             data = json.loads(text)
         except ValueError as e:
-            logging.error(f"Failed to parse rotate captcha response: {e}")
+            logging.error("解析旋转滑块响应失败：%s", e)
             return ""
 
-        logging.info(f"Successfully resolve the rotate captcha token: {data}")
         if not data.get("result"):
-            logging.warning("Rotate captcha server rejected x=%s", x)
+            logging.warning("超星拒绝旋转滑块坐标：x=%s", x)
             return ""
 
         try:
             return json.loads(data["extraData"])["validate"]
         except (KeyError, ValueError, TypeError):
-            logging.info("Can't load rotate validate value. Maybe server return mistake.")
+            logging.warning("旋转滑块响应中没有有效的 validate")
             return ""
 
     def get_textclick_captcha_data(self):
@@ -1777,7 +1796,7 @@ class reserve:
                 request_name="rotate captcha fetch",
             )
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Failed to fetch rotate captcha data: {e}")
+            logging.warning("获取旋转滑块验证码数据失败：%s", e)
             return "", "", "", ""
 
         text = response.text.strip()
@@ -1788,7 +1807,7 @@ class reserve:
         try:
             data = json.loads(text)
         except ValueError as e:
-            logging.error(f"Failed to parse rotate captcha payload: {e}")
+            logging.error("解析旋转滑块验证码数据失败：%s", e)
             return "", "", "", ""
 
         vo = data.get("imageVerificationVo", {})
@@ -1797,7 +1816,7 @@ class reserve:
         shade_url = vo.get("shadeImage") or vo.get("borderImage") or ""
         cutout_url = vo.get("cutoutImage") or vo.get("templateImage") or ""
         logging.info(
-            "Fetched rotate captcha payload: token=%s, iv=%s, shade=%s, cutout=%s",
+            "旋转滑块数据获取完成：token=%s，iv=%s，圆图=%s，背景图=%s",
             bool(captcha_token),
             bool(captcha_iv),
             bool(shade_url),
@@ -1813,6 +1832,7 @@ class reserve:
         }
 
         def _download(url: str, label: str):
+            display_label = "圆图" if label == "shade" else "背景图"
             try:
                 resp = self._get(
                     url,
@@ -1824,28 +1844,13 @@ class reserve:
                 resp.raise_for_status()
                 return resp.content
             except Exception as e:
-                logging.warning("Failed to download rotate %s image: %s", label, e)
+                logging.warning("下载旋转滑块%s失败：%s", display_label, e)
                 return None
 
         shade_bytes = _download(shade_url, "shade")
         cutout_bytes = _download(cutout_url, "cutout")
         if not shade_bytes or not cutout_bytes:
             return None
-
-        if _should_save_captcha_debug_images():
-            try:
-                ts = int(time.time() * 1000)
-                debug_dir = os.path.join(os.path.dirname(__file__), "..", "captcha_debug")
-                os.makedirs(debug_dir, exist_ok=True)
-                shade_path = os.path.join(debug_dir, f"rotate_shade_{ts}.jpg")
-                cutout_path = os.path.join(debug_dir, f"rotate_cutout_{ts}.jpg")
-                with open(shade_path, "wb") as f:
-                    f.write(shade_bytes)
-                with open(cutout_path, "wb") as f:
-                    f.write(cutout_bytes)
-                logging.debug("Saved rotate captcha images to %s and %s", shade_path, cutout_path)
-            except Exception as e:
-                logging.debug("Failed to save rotate captcha images: %s", e)
 
         try:
             from utils.captcha_ocr import TulingCloudOCR
@@ -1855,15 +1860,14 @@ class reserve:
             )
             if not all([username, password, model_id]):
                 logging.error(
-                    "Set TULINGCLOUD_USERNAME, TULINGCLOUD_PASSWORD, "
-                    "and rotate model_id in utils/captcha_ocr/config.py"
+                    "未配置图灵云账号、密码或旋转滑块模型 ID"
                 )
                 return None
 
             ocr = TulingCloudOCR(username=username, password=password, model_id=model_id)
             return ocr.solve_rotate_x(shade_bytes, cutout_bytes)
         except Exception as e:
-            logging.debug("Rotate OCR failed: %s", e)
+            logging.debug("旋转滑块 OCR 失败：%s", e)
             return None
 
     def _recognize_textclick_positions(self, image_url, target_text):

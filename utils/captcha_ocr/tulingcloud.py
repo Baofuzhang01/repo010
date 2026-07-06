@@ -62,7 +62,7 @@ class TulingCloudOCR:
         shade_bytes: bytes,
         cutout_bytes: bytes,
         *,
-        jpeg_quality: int = 95,
+        jpeg_quality: int = 100,
     ) -> bytes:
         """合成图灵云 rotate 模型需要的单张 RGB JPEG。"""
         shade = Image.open(io.BytesIO(shade_bytes)).convert("RGBA")
@@ -74,8 +74,18 @@ class TulingCloudOCR:
         merged = cutout.copy()
         merged.paste(shade, (0, 0), cls._circle_mask(cutout.size))
 
+        canvas = Image.new("RGB", (420, 280), "white")
+        canvas.paste(
+            merged.convert("RGB").resize((200, 200), Image.Resampling.LANCZOS),
+            (110, 10),
+        )
+        draw = ImageDraw.Draw(canvas)
+        draw.rounded_rectangle((25, 228, 395, 272), radius=22, fill="#f8f8f8", outline="#dddddd")
+        draw.ellipse((26, 229, 68, 271), fill="white", outline="#dddddd")
+        draw.text((39, 241), ">>", fill="#555555")
+
         out = io.BytesIO()
-        merged.convert("RGB").save(out, format="JPEG", quality=jpeg_quality)
+        canvas.save(out, format="JPEG", quality=jpeg_quality, subsampling=0)
         return out.getvalue()
     
     def recognize_textclick(self, img_data: bytes) -> Optional[dict]:
