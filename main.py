@@ -270,6 +270,55 @@ def _normalize_backup_slots(raw_slots) -> list[dict]:
     return result
 
 
+def _available_preheated_captchas(results, consumed):
+    return [
+        captcha
+        for shot_idx in (1, 2, 3)
+        if (captcha := results.get(shot_idx, "")) and captcha not in consumed
+    ]
+
+
+def _store_shared_captcha(results, consumed, captcha):
+    if not captcha:
+        return None
+    for slot_idx in (1, 2, 3):
+        if results.get(slot_idx) == captcha:
+            return slot_idx
+    slot_idx = next(
+        (
+            idx
+            for idx in (1, 2, 3)
+            if not results.get(idx) or results.get(idx) in consumed
+        ),
+        None,
+    )
+    if slot_idx is None:
+        return None
+    results[slot_idx] = captcha
+    consumed.discard(captcha)
+    return slot_idx
+
+
+def _reuse_unsubmitted_captcha(submit_sent, captcha):
+    return "" if submit_sent else (captcha or "")
+
+
+def _click_captcha_preheat_slots(slot_count: int):
+    return (1, 2, 3) if slot_count > 1 else (1,)
+
+
+def _should_wait_for_click_preheat(slot_count: int, is_alive: bool) -> bool:
+    return slot_count <= 1 and is_alive
+
+
+def _shared_captcha_preheat_is_serial(slot_count: int) -> bool:
+    return slot_count > 1
+
+
+def _should_wait_for_background_followup(submit_mode: str, shot_idx: int) -> bool:
+    return submit_mode != "burst" and shot_idx > 1
+
+
 def _getusedtimes_conflict_ready(handle) -> bool | None:
     if not isinstance(handle, dict):
         return None
@@ -601,6 +650,34 @@ def _get_first_token_start_dt(target_dt: datetime.datetime) -> datetime.datetime
     return target_dt + datetime.timedelta(milliseconds=FIRST_SUBMIT_OFFSET_MS)
 
 
+def _get_captcha_preheat_deadline(
+    target_dt: datetime.datetime,
+    first_token_start_dt: datetime.datetime,
+    slot_count: int,
+    strategy_mode: str,
+) -> datetime.datetime:
+    if slot_count <= 1 or strategy_mode not in {"A", "C"}:
+        return target_dt
+    return min(
+        target_dt,
+        first_token_start_dt - datetime.timedelta(seconds=2),
+    )
+
+
+def _remaining_captcha_preheat_seconds(
+    now: datetime.datetime,
+    soft_deadline: datetime.datetime,
+    retry_deadline: datetime.datetime,
+    retry_when_empty: bool,
+    results,
+) -> float:
+    if now < soft_deadline:
+        return (soft_deadline - now).total_seconds()
+    if retry_when_empty and not any(results.values()):
+        return (retry_deadline - now).total_seconds()
+    return 0.0
+
+
 def _probe_then_get_page_token(
     s,
     token_url: str,
@@ -703,7 +780,7 @@ def _get_page_token_until_success(
 def _burst_shot_worker(
     index, offset_ms, target_dt, s, token_url,
     times, roomid, seatid, captcha, action, results,
-    token_submit_lock, use_custom_day=False, day="", fid_enc=""
+    token_submit_lock, submitted_captchas, use_custom_day=False, day="", fid_enc=""
 ):
     """定时连发（极限型）的单次提交工作线程。
 
@@ -737,6 +814,7 @@ def _burst_shot_worker(
         logging.info(
             f"[burst] 第 {index + 1} 枪从 {token_url} 即时获取 token：{token}"
         )
+        submitted_captchas.add(captcha)
         result = s.get_submit(
             url=s.submit_url,
             times=times,
@@ -795,9 +873,18 @@ def strategic_first_attempt(
             raise Exception("USERNAMES and PASSWORDS count mismatch")
 
     current_dayofweek = get_current_dayofweek(action)
+    active_strategy_slot_count = sum(
+        1
+        for index, user in enumerate(users)
+        if not success_list[index]
+        and current_dayofweek in user.get("daysofweek", [])
+    )
+    preheated_captcha_results = {1: "", 2: "", 3: ""}
+    consumed_preheated_captchas = set()
     warm_done = False
     shared_strategy_session = None
     shared_strategy_username = None
+    shared_click_preheat_threads = []
     claimed_backup_seats = set()
     strategic_primary_seats = set()
     for candidate_user in users:
@@ -877,7 +964,8 @@ def strategic_first_attempt(
                 )
             )
         captcha1 = captcha2 = captcha3 = ""
-        live_captcha_results = None
+        live_captcha_results = preheated_captcha_results
+        unavailable_preheated_captchas = set(consumed_preheated_captchas)
         textclick_preheat_thread = None
         click_captcha_type = (
             "rotate" if ENABLE_ROTATE else "iconclick" if ENABLE_ICONCLICK else "textclick"
@@ -1056,12 +1144,33 @@ def strategic_first_attempt(
                     not_before=warm_dt,
                 )
 
-            # 验证码预热整体预算：最多占用 [T-slider_lead_seconds_range(ms), T] 这段时间。
-            # 验证码不为页面预热提前让出时间；页面预热窗口不足时由页面预热自行跳过。
-            captcha_deadline = target_dt
+            captcha_deadline = _get_captcha_preheat_deadline(
+                target_dt,
+                first_token_start_dt,
+                active_strategy_slot_count,
+                STRATEGIC_MODE,
+            )
+            multi_slot_soft_deadline = (
+                active_strategy_slot_count > 1 and STRATEGIC_MODE in {"A", "C"}
+            )
+            multi_slot_retry_when_empty = active_strategy_slot_count > 1
+            if multi_slot_soft_deadline:
+                logging.info(
+                    "[策略] 检测到 %d 个时间段，验证码共享池必须在%s节点前 2 秒完成；"
+                    "本次截止时间=%s",
+                    active_strategy_slot_count,
+                    "预取 token" if STRATEGIC_MODE == "A" else "轻探测",
+                    captcha_deadline,
+                )
 
             def _remaining_captcha_seconds() -> float:
-                return (captcha_deadline - _beijing_now()).total_seconds()
+                return _remaining_captcha_preheat_seconds(
+                    _beijing_now(),
+                    captcha_deadline,
+                    _get_beijing_end_dt_from_target(target_dt),
+                    multi_slot_retry_when_empty,
+                    preheated_captcha_results,
+                )
 
             # 2. 按毫秒提前量等待，统一预热滑块、选字、图标或旋转滑块验证码。
             if ENABLE_ROTATE or ENABLE_SLIDER or ENABLE_TEXTCLICK or ENABLE_ICONCLICK:
@@ -1111,8 +1220,6 @@ def strategic_first_attempt(
                         captcha = worker.resolve_captcha(active_captcha_type)
                     return captcha
 
-                captcha_results = {1: "", 2: "", 3: ""}
-                live_captcha_results = captcha_results
                 remaining = _remaining_captcha_seconds()
                 if remaining <= 0:
                     logging.warning(
@@ -1121,23 +1228,41 @@ def strategic_first_attempt(
                 else:
                     def _worker(slot_idx: int):
                         try:
-                            captcha_results[slot_idx] = _resolve_image_captcha_parallel(slot_idx) or ""
+                            if active_strategy_slot_count <= 1:
+                                preheated_captcha_results[slot_idx] = (
+                                    _resolve_image_captcha_parallel(slot_idx) or ""
+                                )
+                                return
+                            while _remaining_captcha_seconds() > 0:
+                                captcha = _resolve_image_captcha_parallel(slot_idx) or ""
+                                if captcha and _remaining_captcha_seconds() > 0:
+                                    preheated_captcha_results[slot_idx] = captcha
+                                    return
+                                if captcha:
+                                    logging.warning(
+                                        "[策略] %s captcha%d 在预热收口后返回，丢弃该结果",
+                                        active_captcha_type,
+                                        slot_idx,
+                                    )
+                                    return
                         except Exception as e:
-                            logging.warning(f"[策略] {active_captcha_type} captcha{slot_idx} 线程失败：{e}")
-                            captcha_results[slot_idx] = ""
+                            logging.warning(
+                                f"[策略] {active_captcha_type} captcha{slot_idx} 线程失败：{e}"
+                            )
+                            preheated_captcha_results[slot_idx] = ""
 
                     deadline_mono = time.monotonic() + remaining
 
-                    def _start_threads(slot_ids: list[int]):
+                    def _start_threads(slot_ids):
                         local_threads = []
-                        for idx in slot_ids:
+                        for slot_idx in slot_ids:
                             t = threading.Thread(
                                 target=_worker,
-                                args=(idx,),
-                                name=f"{active_captcha_type}-captcha-{idx}",
+                                args=(slot_idx,),
+                                name=f"{active_captcha_type}-captcha-{slot_idx}",
                                 daemon=True,
                             )
-                            local_threads.append((idx, t))
+                            local_threads.append((slot_idx, t))
                             t.start()
                         return local_threads
 
@@ -1148,14 +1273,43 @@ def strategic_first_attempt(
                                 break
                             t.join(timeout=timeout_left)
 
-                    if remaining < 3:
+                    if _shared_captcha_preheat_is_serial(active_strategy_slot_count):
+                        logging.info(
+                            "[策略] 多时间段滑块验证码按 captcha1→captcha2→captcha3 串行预热"
+                        )
+
+                        def _serial_worker():
+                            while _remaining_captcha_seconds() > 0:
+                                for slot_idx in (1, 2, 3):
+                                    if _remaining_captcha_seconds() <= 0:
+                                        return
+                                    if not preheated_captcha_results[slot_idx]:
+                                        _worker(slot_idx)
+                                if all(preheated_captcha_results.values()):
+                                    return
+
+                        serial_thread = threading.Thread(
+                            target=_serial_worker,
+                            name="slide-captcha-serial-preheat",
+                            daemon=True,
+                        )
+                        serial_thread.start()
+                        serial_thread.join(
+                            timeout=max(0.0, deadline_mono - time.monotonic())
+                        )
+                    elif remaining < 3:
                         logging.warning(
                             "[策略] 剩余验证码预热预算小于 3 秒，优先预热 slot1/slot2"
                         )
-                        first_two_threads = _start_threads([1, 2])
+                        priority_slots = [1, 2]
+                        first_two_threads = _start_threads(priority_slots)
                         _join_threads_until_deadline(first_two_threads)
 
-                        ready_count = sum(1 for i in [1, 2] if captcha_results[i])
+                        ready_count = sum(
+                            1
+                            for slot_idx in priority_slots
+                            if preheated_captcha_results[slot_idx]
+                        )
                         if ready_count >= 1:
                             logging.warning(
                                 "[策略] 预算小于 3 秒且 captcha1/2 已有结果，跳过 captcha3 预热"
@@ -1172,15 +1326,16 @@ def strategic_first_attempt(
                         all_threads = _start_threads([1, 2, 3])
                         _join_threads_until_deadline(all_threads)
 
-                captcha1 = captcha_results[1]
-                captcha2 = captcha_results[2]
-                captcha3 = captcha_results[3]
+                captcha1 = live_captcha_results[1]
+                captcha2 = live_captcha_results[2]
+                captcha3 = live_captcha_results[3]
                 logging.info(f"[策略] 已预处理 {active_captcha_type} captcha1：{captcha1}")
                 logging.info(f"[策略] 已预处理 {active_captcha_type} captcha2：{captcha2}")
                 logging.info(f"[策略] 已预处理 {active_captcha_type} captcha3：{captcha3}")
             elif ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
-                captcha_results = {1: "", 2: "", 3: ""}
-                live_captcha_results = captcha_results
+                click_preheat_slots = _click_captcha_preheat_slots(
+                    active_strategy_slot_count
+                )
                 remaining = _remaining_captcha_seconds()
                 if remaining <= 0:
                     logging.warning(
@@ -1210,41 +1365,108 @@ def strategic_first_attempt(
                         )
                         return worker
 
-                    def _worker():
+                    def _worker(slot_idx: int):
                         try:
-                            captcha_results[1] = _resolve_textclick_with_retries(
+                            captcha = _resolve_textclick_with_retries(
                                 _make_textclick_worker(),
-                                "preheat captcha1",
+                                f"preheat captcha{slot_idx}",
                                 max_retries=None,
                                 deadline_func=_remaining_captcha_seconds,
                             ) or ""
+                            if active_strategy_slot_count <= 1:
+                                preheated_captcha_results[slot_idx] = captcha
+                                return
+                            if captcha and _remaining_captcha_seconds() > 0:
+                                preheated_captcha_results[slot_idx] = captcha
+                                if _beijing_now() >= captcha_deadline:
+                                    shared_click_preheat_threads.clear()
+                            elif captcha:
+                                logging.warning(
+                                    "[策略] %s captcha%d 在预热收口后返回，丢弃该结果",
+                                    click_captcha_name,
+                                    slot_idx,
+                                )
                         except Exception as e:
                             logging.warning(
-                                f"[策略] {click_captcha_name} 第一个验证码预热线程失败：{e}"
+                                f"[策略] {click_captcha_name} captcha{slot_idx} 预热线程失败：{e}"
                             )
-                            captcha_results[1] = ""
+                            preheated_captcha_results[slot_idx] = ""
 
                     deadline_mono = time.monotonic() + remaining
                     logging.info(
-                        f"[策略] 开始预热{click_captcha_name}第一个验证码，"
-                        "持续到取得验证令牌或达到目标时间截止点"
+                        "[策略] 开始%s预热 %d 份%s验证码%s",
+                        "串行" if _shared_captcha_preheat_is_serial(active_strategy_slot_count) else "",
+                        len(click_preheat_slots),
+                        click_captcha_name,
+                        "，未消费的结果可顺延给后续时间段"
+                        if active_strategy_slot_count > 1
+                        else "",
                     )
-                    textclick_preheat_thread = threading.Thread(
-                        target=_worker,
-                        name=f"{click_captcha_type}-captcha-1",
-                        daemon=True,
-                    )
-                    textclick_preheat_thread.start()
-                    timeout_left = deadline_mono - time.monotonic()
-                    if timeout_left > 0:
-                        textclick_preheat_thread.join(timeout=timeout_left)
+                    if _shared_captcha_preheat_is_serial(active_strategy_slot_count):
+                        def _serial_worker():
+                            while _remaining_captcha_seconds() > 0:
+                                for slot_idx in click_preheat_slots:
+                                    if _remaining_captcha_seconds() <= 0:
+                                        return
+                                    if not preheated_captcha_results[slot_idx]:
+                                        _worker(slot_idx)
+                                if all(
+                                    preheated_captcha_results[slot_idx]
+                                    for slot_idx in click_preheat_slots
+                                ):
+                                    return
 
-                captcha1 = captcha_results[1]
-                captcha2 = ""
-                captcha3 = ""
+                        textclick_preheat_threads = [threading.Thread(
+                            target=_serial_worker,
+                            name=f"{click_captcha_type}-captcha-serial-preheat",
+                            daemon=True,
+                        )]
+                    else:
+                        textclick_preheat_threads = [
+                            threading.Thread(
+                                target=_worker,
+                                args=(slot_idx,),
+                                name=f"{click_captcha_type}-captcha-{slot_idx}",
+                                daemon=True,
+                            )
+                            for slot_idx in click_preheat_slots
+                        ]
+                    shared_click_preheat_threads[:] = textclick_preheat_threads
+                    for thread in textclick_preheat_threads:
+                        thread.start()
+                    for thread in textclick_preheat_threads:
+                        timeout_left = deadline_mono - time.monotonic()
+                        if timeout_left <= 0:
+                            break
+                        thread.join(timeout=timeout_left)
+                    textclick_preheat_thread = next(
+                        (thread for thread in textclick_preheat_threads if thread.is_alive()),
+                        None,
+                    )
+
+                ready_count = sum(bool(captcha) for captcha in live_captcha_results.values())
+                if multi_slot_retry_when_empty:
+                    if ready_count:
+                        textclick_preheat_thread = None
+                        shared_click_preheat_threads.clear()
+                        logging.info(
+                            "[策略] 多时间段验证码预热到软截止点已完成 %d/3 份；"
+                            "已有至少一份，不再等待其余结果",
+                            ready_count,
+                        )
+                    else:
+                        logging.warning(
+                            "[策略] 多时间段验证码预热到软截止点仍为 0/3；"
+                            "后台继续重试，取得第一份后立即停止"
+                        )
+
+                captcha1 = live_captcha_results[1]
+                captcha2 = live_captcha_results[2]
+                captcha3 = live_captcha_results[3]
                 logging.info(
-                    f"[策略] {click_captcha_name}预热结果是否就绪：%s",
-                    bool(captcha1),
+                    f"[策略] 当前时间段{click_captcha_name}预热完成 %d/%d 份",
+                    sum(bool(captcha) for captcha in (captcha1, captcha2, captcha3)),
+                    len(click_preheat_slots),
                 )
         else:
             s = shared_strategy_session
@@ -1260,25 +1482,65 @@ def strategic_first_attempt(
                 f"[策略] {username} 复用 {shared_strategy_username} 的已预热 session；"
                 "跳过登录和验证码预热"
             )
-            if ENABLE_SLIDER:
-                active_captcha_type = "slide"
-                logging.info(
-                    f"[策略] 当前配置跳过验证码预热，按需获取 {active_captcha_type} 验证码"
+            available_preheated_captchas = _available_preheated_captchas(
+                live_captcha_results,
+                consumed_preheated_captchas,
+            )
+            if (
+                active_strategy_slot_count > 1
+                and (ENABLE_ROTATE or ENABLE_SLIDER or ENABLE_TEXTCLICK or ENABLE_ICONCLICK)
+                and not available_preheated_captchas
+            ):
+                logging.warning(
+                    "[策略] 多时间段验证码共享池已为 0；当前时间段现场获取一份新验证码"
                 )
-                captcha1 = s.resolve_captcha(active_captcha_type) or ""
-                captcha2 = s.resolve_captcha(active_captcha_type) or ""
-                captcha3 = s.resolve_captcha(active_captcha_type) or ""
-            elif ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
-                logging.info(
-                    f"[策略] 当前配置跳过验证码预热，先获取一个{click_captcha_name}验证码"
+
+                def _remaining_onsite_captcha_seconds() -> float:
+                    return (
+                        _get_beijing_end_dt_from_target(target_dt) - _beijing_now()
+                    ).total_seconds()
+
+                if ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
+                    onsite_captcha = _resolve_textclick_with_retries(
+                        s,
+                        "shared pool zero onsite",
+                        max_retries=None,
+                        deadline_func=_remaining_onsite_captcha_seconds,
+                    )
+                else:
+                    onsite_captcha = _resolve_single_captcha_until_success(
+                        s,
+                        "slide",
+                        "shared pool zero onsite",
+                        max_retries=None,
+                        deadline_func=_remaining_onsite_captcha_seconds,
+                    )
+                slot_idx = _store_shared_captcha(
+                    live_captcha_results,
+                    consumed_preheated_captchas,
+                    onsite_captcha,
                 )
-                captcha1 = _resolve_textclick_with_retries(
-                    s,
-                    "reuse-session captcha1",
-                    max_retries=3,
-                ) or ""
-                captcha2 = ""
-                captcha3 = ""
+                if slot_idx is not None:
+                    logging.info(
+                        "[策略] 共享池现场补充成功：captcha%d 已就绪",
+                        slot_idx,
+                    )
+                    available_preheated_captchas = _available_preheated_captchas(
+                        live_captcha_results,
+                        consumed_preheated_captchas,
+                    )
+                else:
+                    logging.warning(
+                        "[策略] 共享池现场补充未成功；当前时间段继续按空验证码保护逻辑执行"
+                    )
+            captcha1, captcha2, captcha3 = (
+                available_preheated_captchas + ["", "", ""]
+            )[:3]
+            if ENABLE_ROTATE or ENABLE_SLIDER or ENABLE_TEXTCLICK or ENABLE_ICONCLICK:
+                logging.info(
+                    "[策略] 当前时间段领取共享预热池剩余结果：%d/3 份可用",
+                    sum(bool(captcha) for captcha in (captcha1, captcha2, captcha3)),
+                )
 
         captcha_required = bool(
             ENABLE_ROTATE or ENABLE_SLIDER or ENABLE_TEXTCLICK or ENABLE_ICONCLICK
@@ -1293,7 +1555,12 @@ def strategic_first_attempt(
             else "textclick"
         )
         raw_captchas = [captcha1, captcha2, captcha3]
-        if (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE) and captcha1:
+        if (
+            (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE)
+            and captcha1
+            and not captcha2
+            and not captcha3
+        ):
             captchas_for_submit = [captcha1, captcha1, captcha1]
             logging.info(
                 f"[策略] 已准备第一个{click_captcha_name}验证码；后续每次真正提交后都会按已消费处理，失败续枪会优先换新验证码"
@@ -1329,19 +1596,11 @@ def strategic_first_attempt(
             if not captcha_required or not live_captcha_results:
                 return
 
-            if ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE:
-                live_first = live_captcha_results.get(1, "")
-                if live_first and not captchas_for_submit[0]:
-                    captchas_for_submit[:] = [live_first, live_first, live_first]
-                    logging.info(
-                        f"[策略] 收到稍晚返回的{click_captcha_name}预热结果，已刷新提交队列"
-                    )
-                return
-
             live_captchas = [
-                live_captcha_results.get(1, ""),
-                live_captcha_results.get(2, ""),
-                live_captcha_results.get(3, ""),
+                captcha
+                for shot_idx in (1, 2, 3)
+                if (captcha := live_captcha_results.get(shot_idx, ""))
+                and captcha not in unavailable_preheated_captchas
             ]
             merged = []
             seen = set()
@@ -1359,6 +1618,36 @@ def strategic_first_attempt(
                     f"captcha2={captchas_for_submit[1]}, captcha3={captchas_for_submit[2]}"
                 )
 
+        def _click_preheat_is_alive() -> bool:
+            return any(thread.is_alive() for thread in shared_click_preheat_threads)
+
+        def _wait_for_first_background_captcha(shot_idx: int, list_idx: int) -> bool:
+            if not _should_wait_for_background_followup(effective_submit_mode, shot_idx):
+                return False
+            wait_deadline = _get_beijing_end_dt_from_target(target_dt)
+            logging.info(
+                "[策略] 第 %d 次提交等待多时间段%s后台取得第一份验证码；"
+                "A/C 首次 token 节点已经执行，不会被本次等待推迟",
+                shot_idx,
+                click_captcha_name,
+            )
+            for thread in list(shared_click_preheat_threads):
+                timeout_left = (wait_deadline - _beijing_now()).total_seconds()
+                if timeout_left <= 0:
+                    break
+                thread.join(timeout=timeout_left)
+                _refresh_submit_captchas_from_live_results()
+                if any(captchas_for_submit):
+                    break
+            if not captchas_for_submit[list_idx]:
+                reusable = next(
+                    (captcha for captcha in captchas_for_submit if captcha),
+                    "",
+                )
+                if reusable:
+                    captchas_for_submit[list_idx] = reusable
+            return bool(captchas_for_submit[list_idx])
+
         def _prepare_textclick_captcha_for_submit(
             shot_idx: int,
             reason: str,
@@ -1371,6 +1660,23 @@ def strategic_first_attempt(
             _refresh_submit_captchas_from_live_results()
             list_idx = shot_idx - 1
             if not (0 <= list_idx < len(captchas_for_submit)):
+                return
+
+            if (
+                _click_preheat_is_alive()
+                and not _should_wait_for_click_preheat(
+                    active_strategy_slot_count,
+                    True,
+                )
+            ):
+                if _wait_for_first_background_captcha(shot_idx, list_idx):
+                    return
+                logging.info(
+                    "[策略] 多时间段%s后台预热仍在重试；第 %d 次提交不等待，"
+                    "避免阻塞 A/C token 节点",
+                    click_captcha_name,
+                    shot_idx,
+                )
                 return
 
             if (
@@ -1429,6 +1735,12 @@ def strategic_first_attempt(
             ) or ""
             if captcha:
                 captchas_for_submit[list_idx] = captcha
+                if active_strategy_slot_count > 1:
+                    _store_shared_captcha(
+                        live_captcha_results,
+                        consumed_preheated_captchas,
+                        captcha,
+                    )
             else:
                 logging.warning(
                     f"[策略] 为第 {shot_idx} 次提交准备{click_captcha_name}验证码失败"
@@ -1451,6 +1763,12 @@ def strategic_first_attempt(
             captcha = s.resolve_captcha("slide") or ""
             if captcha:
                 captchas_for_submit[list_idx] = captcha
+                if active_strategy_slot_count > 1:
+                    _store_shared_captcha(
+                        live_captcha_results,
+                        consumed_preheated_captchas,
+                        captcha,
+                    )
             else:
                 logging.warning(
                     f"[策略] 为第 {shot_idx} 次提交准备滑块验证码失败"
@@ -1463,6 +1781,13 @@ def strategic_first_attempt(
                 max_retries=max_retries,
             )
             _prepare_slide_captcha_for_submit(shot_idx, reason)
+
+        def _has_distinct_preheated_captcha(shot_idx: int) -> bool:
+            list_idx = shot_idx - 1
+            if not (0 <= list_idx < len(captchas_for_submit)):
+                return False
+            captcha = captchas_for_submit[list_idx]
+            return bool(captcha) and captcha not in captchas_for_submit[:list_idx]
 
         def _last_submit_failure_msg() -> str:
             if not isinstance(s.last_submit_result, dict):
@@ -1482,6 +1807,24 @@ def strategic_first_attempt(
             )
             if captcha:
                 return captcha
+
+            if (
+                (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE)
+                and _click_preheat_is_alive()
+                and not _should_wait_for_click_preheat(
+                    active_strategy_slot_count,
+                    True,
+                )
+            ):
+                if _wait_for_first_background_captcha(shot_idx, list_idx):
+                    return captchas_for_submit[list_idx]
+                logging.warning(
+                    "[策略] 多时间段%s后台预热仍在重试；第 %d 次提交跳过等待，"
+                    "稍后结果继续进入共享池",
+                    click_captcha_name,
+                    shot_idx,
+                )
+                return None
 
             if (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE) and shot_idx == 1:
                 logging.error(
@@ -1504,6 +1847,12 @@ def strategic_first_attempt(
             if captcha:
                 if 0 <= list_idx < len(captchas_for_submit):
                     captchas_for_submit[list_idx] = captcha
+                if active_strategy_slot_count > 1:
+                    _store_shared_captcha(
+                        live_captcha_results,
+                        consumed_preheated_captchas,
+                        captcha,
+                    )
                 logging.info(
                     f"[策略] 第 {shot_idx} 次提交按需获取到{click_captcha_name}验证码：{captcha}"
                 )
@@ -1520,6 +1869,17 @@ def strategic_first_attempt(
 
             _refresh_submit_captchas_from_live_results()
             if captchas_for_submit[0]:
+                return True
+
+            if (
+                multi_slot_retry_when_empty
+                and _beijing_now() >= captcha_deadline
+            ):
+                logging.warning(
+                    "[策略] 多时间段%s在软截止点仍为 0 份；后台继续重试，"
+                    "A/C token 流程按原定节点继续",
+                    click_captcha_name,
+                )
                 return True
 
             guard_ms = TEXTCLICK_FIRST_CAPTCHA_GUARD_MS
@@ -1830,22 +2190,37 @@ def strategic_first_attempt(
                 )
 
         skip_first_strategic_submit = not _ensure_textclick_captcha1_before_strategic_token()
-        use_serial_followups = skip_first_strategic_submit and SUBMIT_MODE == "burst"
+        background_captcha_zero = bool(
+            SUBMIT_MODE == "burst"
+            and active_strategy_slot_count > 1
+            and (ENABLE_TEXTCLICK or ENABLE_ICONCLICK or ENABLE_ROTATE)
+            and not captchas_for_submit[0]
+        )
+        use_serial_followups = SUBMIT_MODE == "burst" and (
+            skip_first_strategic_submit or background_captcha_zero
+        )
+        effective_submit_mode = "serial" if use_serial_followups else SUBMIT_MODE
         if use_serial_followups:
+            reason = (
+                "第一个验证码错过硬截止点"
+                if skip_first_strategic_submit
+                else "多时间段共享池在软截止点仍为 0 份"
+            )
             logging.warning(
-                "[策略] burst 模式下第一个验证码错过硬截止点；"
-                "跳过已过期的连发计划，改用串行第二/第三枪"
+                "[策略] burst 模式下%s；跳过连发计划，改用串行续枪",
+                reason,
             )
 
         if SUBMIT_MODE == "burst" and not use_serial_followups:
             # ── 定时连发（极限型）──
             n_shots = len(BURST_OFFSETS_MS)
             for shot_idx in range(2, n_shots + 1):
-                _prepare_fresh_captcha_for_submit(
-                    shot_idx,
-                    "burst 连发每次预约 POST 都会消费一个验证码，因此每枪必须使用独立验证码",
-                    max_retries=None,
-                )
+                if not _has_distinct_preheated_captcha(shot_idx):
+                    _prepare_fresh_captcha_for_submit(
+                        shot_idx,
+                        "burst 连发每次预约 POST 都会消费一个验证码，因此每枪必须使用独立验证码",
+                        max_retries=None,
+                    )
             captchas_list = (
                 captchas_for_submit + [""] * max(0, n_shots - len(captchas_for_submit))
             )[:n_shots]
@@ -1879,6 +2254,7 @@ def strategic_first_attempt(
             )
 
             burst_results = [None] * n_shots
+            burst_submitted_captchas = set()
             threads = []
             for burst_i, burst_offset_ms in enumerate(BURST_OFFSETS_MS):
                 burst_cap = captchas_list[burst_i] if burst_i < len(captchas_list) else ""
@@ -1887,7 +2263,8 @@ def strategic_first_attempt(
                     args=(
                         burst_i, burst_offset_ms, target_dt, s, burst_token_url,
                         times, burst_room, burst_seat, burst_cap, action, burst_results,
-                        token_submit_lock, use_custom_day, submit_day, burst_fid,
+                        token_submit_lock, burst_submitted_captchas,
+                        use_custom_day, submit_day, burst_fid,
                     ),
                     daemon=True,
                     name=f"burst-shot-{burst_i + 1}",
@@ -1903,6 +2280,10 @@ def strategic_first_attempt(
             for t in threads:
                 t.join(timeout=30)
 
+            preheated_values = set(preheated_captcha_results.values()) - {""}
+            consumed_preheated_captchas.update(
+                burst_submitted_captchas & preheated_values
+            )
             suc = any(r for r in burst_results if r)
             logging.info(
                 f"[策略] [burst] 所有提交完成，结果：{burst_results}，整体是否成功：{suc}"
@@ -1924,6 +2305,8 @@ def strategic_first_attempt(
                 try:
                     return s.get_submit(**kwargs)
                 finally:
+                    if submit_captcha in preheated_captcha_results.values():
+                        consumed_preheated_captchas.add(submit_captcha)
                     if (
                         ENABLE_ROTATE
                         and submit_captcha
@@ -1985,6 +2368,19 @@ def strategic_first_attempt(
             def _stash_unconsumed_followup_captcha(shot_idx: int, captcha: str, reason: str):
                 if not captcha:
                     return
+                if active_strategy_slot_count > 1:
+                    slot_idx = _store_shared_captcha(
+                        live_captcha_results,
+                        consumed_preheated_captchas,
+                        captcha,
+                    )
+                    if slot_idx is not None:
+                        logging.info(
+                            "[策略] 第 %d 枪验证码未提交消费（%s），已保留在共享池 captcha%d",
+                            shot_idx,
+                            reason,
+                            slot_idx,
+                        )
                 if ENABLE_ROTATE:
                     s._rotate_normal_reusable_captcha = captcha
                     logging.info(
@@ -2214,7 +2610,10 @@ def strategic_first_attempt(
                     ),
                     first_submit_sent,
                 )
-                if first_submit_sent or skip_first_strategic_submit:
+                if (
+                    (first_submit_sent or skip_first_strategic_submit)
+                    and not _has_distinct_preheated_captcha(2)
+                ):
                     _prepare_fresh_captcha_for_submit(
                         2,
                         (
@@ -2279,24 +2678,31 @@ def strategic_first_attempt(
                 logging.info("[策略] 第二枪未成功，准备第三枪：先准备验证码，再查座，空闲后取新页面 token 提交")
                 second_failure_msg = _last_submit_failure_msg()
                 second_submit_sent = 2 in serial_submitted_shots
+                reusable_second_captcha = _reuse_unsubmitted_captcha(
+                    second_submit_sent,
+                    submit_captcha2,
+                )
                 logging.info(
                     "[策略] 第二枪失败原因：%s；是否已发送提交=%s",
                     second_failure_msg or "<空>",
                     second_submit_sent,
                 )
-                if second_submit_sent:
+                if second_submit_sent and not _has_distinct_preheated_captcha(3):
                     _prepare_fresh_captcha_for_submit(
                         3,
                         "第二枪已发送预约 POST，因此验证码按已消费处理",
                         max_retries=None,
                     )
-                elif captcha_required and captchas_for_submit[1]:
-                    captchas_for_submit[2] = captchas_for_submit[1]
+                elif reusable_second_captcha:
                     logging.info(
                         "[策略] 第二枪没有发送预约 POST；第三枪复用第二枪未消费的新验证码"
                     )
 
-                submit_captcha3 = _get_submit_captcha(3)
+                submit_captcha3 = (
+                    reusable_second_captcha
+                    if reusable_second_captcha
+                    else _get_submit_captcha(3)
+                )
                 if submit_captcha3 is None:
                     suc = False
                 elif not _serial_followup_seat_is_free(3):

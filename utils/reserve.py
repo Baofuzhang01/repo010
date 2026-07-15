@@ -569,7 +569,10 @@ class reserve:
 
     @staticmethod
     def _is_terminal_submit_failure(msg: str) -> bool:
-        return "已有预约" in msg or "已被占用" in msg
+        return any(
+            marker in msg
+            for marker in ("已有预约", "已被占用", "同时预约数量已达上限")
+        )
 
     @staticmethod
     def _is_abort_submit_failure(msg: str) -> bool:
